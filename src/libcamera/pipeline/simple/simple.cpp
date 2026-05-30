@@ -737,7 +737,24 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
 	format.code = code;
 	format.size = size;
 
-	int ret = setupFormats(&format, V4L2Subdevice::TryFormat);
+	int ret;
+	if (pipe()->atomispQuirks()) {
+		/*
+		 * On some AtomISP paths TRY negotiation under-reports the attainable
+		 * output size. Probe with ACTIVE first to discover usable configs.
+		 */
+		ret = setupFormats(&format, V4L2Subdevice::ActiveFormat);
+		if (ret < 0) {
+			LOG(SimplePipeline, Debug)
+				<< "ACTIVE probing failed for " << V4L2SubdeviceFormat{ code, size, {} }
+				<< ", falling back to TRY";
+			format.code = code;
+			format.size = size;
+			ret = setupFormats(&format, V4L2Subdevice::TryFormat);
+		}
+	} else {
+		ret = setupFormats(&format, V4L2Subdevice::TryFormat);
+	}
 	if (ret < 0) {
 		/* Pipeline configuration failed, skip this configuration. */
 		format.code = code;
