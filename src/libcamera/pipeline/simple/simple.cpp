@@ -28,6 +28,7 @@
 #include <libcamera/camera.h>
 #include <libcamera/color_space.h>
 #include <libcamera/control_ids.h>
+#include <libcamera/formats.h>
 #include <libcamera/geometry.h>
 #include <libcamera/pixel_format.h>
 #include <libcamera/stream.h>
@@ -429,6 +430,7 @@ public:
 	V4L2Subdevice *subdev(const MediaEntity *entity);
 	std::shared_ptr<MediaDevice> converter() { return converter_; }
 	bool swIspEnabled() const { return swIspEnabled_; }
+	bool atomispQuirks() const { return atomispQuirks_; }
 
 protected:
 	int queueRequestDevice(Camera *camera, Request *request) override;
@@ -462,6 +464,7 @@ private:
 
 	std::shared_ptr<MediaDevice> converter_;
 	bool swIspEnabled_;
+	bool atomispQuirks_;
 };
 
 /* -----------------------------------------------------------------------------
@@ -731,6 +734,19 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
 				<< "Unsupported V4L2 pixel format "
 				<< videoFormat.first.toString();
 
+			continue;
+		}
+
+		/*
+		 * On AtomISP, RGB565 previews can show channel-order artifacts in
+		 * generic preview apps. Prefer YUV formats for stable PoC behavior.
+		 */
+		if (pipe()->atomispQuirks() &&
+		    (pixelFormat == formats::RGB565 ||
+		     pixelFormat == formats::RGB565_BE)) {
+			LOG(SimplePipeline, Debug)
+				<< "Skipping " << pixelFormat
+				<< " for AtomISP preview stability";
 			continue;
 		}
 
@@ -1144,9 +1160,20 @@ CameraConfiguration::Status SimpleCameraConfiguration::validate()
 		return Invalid;
 
 	Orientation requestedOrientation = orientation;
-	combinedTransform_ = sensor->computeTransform(&orientation);
-	if (orientation != requestedOrientation)
-		status = Adjusted;
+	if (data_->pipe()->atomispQuirks()) {
+		/*
+		 * On AtomISP + mt9m114 the orientation metadata is incomplete and
+		 * automatic transform computation can rotate the pipeline into an
+		 * unintended portrait path (for example 400x592). Keep identity
+		 * transform for stable preview geometry.
+		 */
+		combinedTransform_ = Transform::Identity;
+		orientation = requestedOrientation;
+	} else {
+		combinedTransform_ = sensor->computeTransform(&orientation);
+		if (orientation != requestedOrientation)
+			status = Adjusted;
+	}
 
 	/* Cap the number of entries to the available streams. */
 	if (config_.size() > data_->streams_.size()) {
@@ -1404,7 +1431,9 @@ CameraConfiguration::Status SimpleCameraConfiguration::validate()
 
 SimplePipelineHandler::SimplePipelineHandler(CameraManager *manager)
 	: PipelineHandler(manager, kMaxQueuedRequestsDevice),
-	  converter_(nullptr)
+	  converter_(nullptr),
+	  swIspEnabled_(false),
+	  atomispQuirks_(false)
 {
 }
 
@@ -1661,11 +1690,25 @@ int SimplePipelineHandler::start(Camera *camera, [[maybe_unused]] const ControlL
 	if (frameStartEmitter) {
 		ret = frameStartEmitter->setFrameStartEnabled(true);
 		if (ret) {
-			stop(camera);
-			return ret;
-		}
-		frameStartEmitter->frameStart.connect(data->delayedCtrls_.get(),
+			if (atomispQuirks_) {
+				/*
+				 * On AtomISP, frame-start enabling can fail at runtime despite
+				 * the entity advertising support. Continue without frame-start
+				 * driven delayed controls so streaming can still operate.
+				 */
+				LOG(SimplePipeline, Warning)
+					<< "Frame start events unavailable on "
+					<< frameStartEmitter->entity()->name() << ": "
+					<< strerror(-ret) << " (" << ret << "), continuing without them";
+				frameStartEmitter = nullptr;
+			} else {
+				stop(camera);
+				return ret;
+			}
+		} else {
+			frameStartEmitter->frameStart.connect(data->delayedCtrls_.get(),
 						      &DelayedControls::applyControls);
+		}
 	}
 
 	ret = video->streamOn();
@@ -1893,6 +1936,8 @@ bool SimplePipelineHandler::matchDevice(std::shared_ptr<MediaDevice> media,
 	}
 
 	swIspEnabled_ = info.swIspEnabled;
+	atomispQuirks_ = !strcmp(info.driver, "atomisp") ||
+			 !strcmp(info.driver, "atomisp-isp2");
 	const GlobalConfiguration &configuration = cameraManager()->_d()->configuration();
 	for (const ValueNode &entry :
 	     configuration.configuration()["pipelines"]["simple"]["supported_devices"]
