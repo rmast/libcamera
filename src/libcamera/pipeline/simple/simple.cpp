@@ -7,6 +7,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <iterator>
 #include <list>
 #include <map>
@@ -681,9 +682,38 @@ int SimpleCameraData::init()
 		}
 	}
 
+	Size maxEnumeratedSensorSize;
 	for (unsigned int code : sensor_->mbusCodes()) {
 		for (const Size &size : sensor_->sizes(code))
+			maxEnumeratedSensorSize.expandTo(size);
+
+		for (const Size &size : sensor_->sizes(code))
 			tryPipeline(code, size);
+	}
+
+
+	if (configs_.empty() && pipe->atomispQuirks()) {
+		/*
+		 * If no configuration could be derived from sensor enumeration,
+		 * retry probing with a small set of common fallback sizes.
+		 * Keep this confined to AtomISP and only as a last resort.
+		 */
+		const std::vector<Size> fallbackSizes = {
+			Size(1280, 960),
+			Size(1280, 720),
+			Size(1024, 768),
+			Size(960, 720),
+			Size(800, 600),
+			Size(640, 480),
+		};
+
+		LOG(SimplePipeline, Warning)
+			<< "No valid AtomISP configuration from enumerated modes, retrying with fallback sizes";
+
+		for (unsigned int code : sensor_->mbusCodes()) {
+			for (const Size &size : fallbackSizes)
+				tryPipeline(code, size);
+		}
 	}
 
 	if (configs_.empty()) {
@@ -923,14 +953,40 @@ int SimpleCameraData::setupFormats(V4L2SubdeviceFormat *format,
 
 			if (format->code != sourceFormat.code ||
 			    format->size != sourceFormat.size) {
-				LOG(SimplePipeline, Debug)
-					<< "Source '" << source->entity()->name()
-					<< "':" << source->index()
-					<< " produces " << sourceFormat
-					<< ", sink '" << sink->entity()->name()
-					<< "':" << sink->index()
-					<< " requires " << *format;
-				return -EINVAL;
+				if (pipe->atomispQuirks() &&
+				    format->code == sourceFormat.code) {
+					int dw = std::abs(static_cast<int>(format->size.width) -
+							  static_cast<int>(sourceFormat.size.width));
+					int dh = std::abs(static_cast<int>(format->size.height) -
+							  static_cast<int>(sourceFormat.size.height));
+
+					if (dw <= 8 && dh <= 8) {
+						LOG(SimplePipeline, Debug)
+							<< "Tolerating AtomISP source/sink size delta on "
+							<< source->entity()->name() << ":" << source->index()
+							<< " -> " << sink->entity()->name() << ":" << sink->index()
+							<< " (source " << sourceFormat.size
+							<< ", sink " << format->size << ")";
+					} else {
+						LOG(SimplePipeline, Debug)
+							<< "Source '" << source->entity()->name()
+							<< "':" << source->index()
+							<< " produces " << sourceFormat
+							<< ", sink '" << sink->entity()->name()
+							<< "':" << sink->index()
+							<< " requires " << *format;
+						return -EINVAL;
+					}
+				} else {
+					LOG(SimplePipeline, Debug)
+						<< "Source '" << source->entity()->name()
+						<< "':" << source->index()
+						<< " produces " << sourceFormat
+						<< ", sink '" << sink->entity()->name()
+						<< "':" << sink->index()
+						<< " requires " << *format;
+					return -EINVAL;
+				}
 			}
 		}
 
