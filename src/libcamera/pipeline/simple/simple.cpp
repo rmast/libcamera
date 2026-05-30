@@ -1526,18 +1526,21 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 		return ret;
 
 	/* Configure the video node, taking into account any Bayer pattern change. */
-	V4L2PixelFormat videoFormat;
-	if (format.code == pipeConfig->code) {
-		videoFormat = video->toV4L2PixelFormat(pipeConfig->captureFormat);
-	} else {
-		/*
-		 * Bayer pattern has changed because of the transform that was applied on
-		 * the sensor. Get the V4L2PixelFormat corresponding to the configured Bayer
-		 * pattern.
-		 */
+	V4L2PixelFormat videoFormat = video->toV4L2PixelFormat(pipeConfig->captureFormat);
+
+	/*
+	 * Only recalculate the V4L2 pixel format from Bayer order if the capture
+	 * format is itself a Bayer format. Some pipelines legitimately change media
+	 * bus codes while keeping a non-Bayer capture node format.
+	 */
+	if (format.code != pipeConfig->code) {
 		BayerFormat cfgBayer = BayerFormat::fromPixelFormat(pipeConfig->captureFormat);
-		cfgBayer.order = data->sensor_->bayerOrder(config->combinedTransform());
-		videoFormat = cfgBayer.toV4L2PixelFormat();
+		if (cfgBayer.isValid()) {
+			cfgBayer.order = data->sensor_->bayerOrder(config->combinedTransform());
+			V4L2PixelFormat transformedFormat = cfgBayer.toV4L2PixelFormat();
+			if (transformedFormat.isValid())
+				videoFormat = transformedFormat;
+		}
 	}
 
 	V4L2DeviceFormat captureFormat;
