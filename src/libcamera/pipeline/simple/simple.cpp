@@ -1779,6 +1779,15 @@ SimplePipelineHandler::locateSensors(MediaDevice *media)
 	if (entities.empty())
 		return {};
 
+	if (atomispQuirks_) {
+		/*
+		 * Keep the real sensor entities (MEDIA_ENT_F_CAM_SENSOR) as camera
+		 * roots for AtomISP split sensor+ISP topologies. Mandatory controls
+		 * may only exist on the sensor entity.
+		 */
+		return entities;
+	}
+
 	/*
 	 * Sensors can be made of multiple entities. For instance, a raw sensor
 	 * can be connected to an ISP, and the combination of both should be
