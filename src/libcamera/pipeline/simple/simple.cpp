@@ -796,6 +796,13 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
 	}
 
 	V4L2VideoDevice::Formats videoFormats = video_->formats(format.code);
+	if (videoFormats.empty() && pipe()->atomispQuirks() &&
+	    !video_->caps().hasMediaController()) {
+		LOG(SimplePipeline, Warning)
+			<< "Video node " << video_->deviceNode()
+			<< " does not support media-bus code filtering, retrying format enumeration without code";
+		videoFormats = video_->formats();
+	}
 
 	LOG(SimplePipeline, Debug)
 		<< "Adding configuration for " << format.size
@@ -829,29 +836,39 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
 			continue;
 		}
 
-		Configuration config;
-		config.code = code;
-		config.sensorSize = size;
-		config.captureFormat = pixelFormat;
-		config.captureSize = format.size;
+		std::vector<Size> captureSizes = { format.size };
+		if (pipe()->atomispQuirks()) {
+			for (const SizeRange &range : videoFormat.second) {
+				if (std::find(captureSizes.begin(), captureSizes.end(), range.max) == captureSizes.end())
+					captureSizes.push_back(range.max);
+			}
+		}
 
-		if (converter_) {
-			config.outputFormats = converter_->formats(pixelFormat);
-			config.outputSizes = converter_->sizes(format.size);
-		} else if (swIsp_) {
-			config.outputFormats = swIsp_->formats(pixelFormat);
-			config.outputSizes = swIsp_->sizes(pixelFormat, format.size);
-			if (config.outputFormats.empty()) {
-				/* Do not use swIsp for unsupported pixelFormat's. */
+		for (const Size &captureSize : captureSizes) {
+			Configuration config;
+			config.code = code;
+			config.sensorSize = size;
+			config.captureFormat = pixelFormat;
+			config.captureSize = captureSize;
+
+			if (converter_) {
+				config.outputFormats = converter_->formats(pixelFormat);
+				config.outputSizes = converter_->sizes(captureSize);
+			} else if (swIsp_) {
+				config.outputFormats = swIsp_->formats(pixelFormat);
+				config.outputSizes = swIsp_->sizes(pixelFormat, captureSize);
+				if (config.outputFormats.empty()) {
+					/* Do not use swIsp for unsupported pixelFormat's. */
+					config.outputFormats = { pixelFormat };
+					config.outputSizes = config.captureSize;
+				}
+			} else {
 				config.outputFormats = { pixelFormat };
 				config.outputSizes = config.captureSize;
 			}
-		} else {
-			config.outputFormats = { pixelFormat };
-			config.outputSizes = config.captureSize;
-		}
 
-		configs_.push_back(config);
+			configs_.push_back(config);
+		}
 	}
 }
 
