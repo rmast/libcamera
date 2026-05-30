@@ -649,6 +649,38 @@ int SimpleCameraData::init()
 	 * Generate the list of possible pipeline configurations by trying each
 	 * media bus format and size supported by the sensor.
 	 */
+	if (pipe->atomispQuirks()) {
+		/*
+		 * Some AtomISP + mt9m114 combinations exhibit cumulative shrinking
+		 * of the active format while probing. Reset once to the largest
+		 * available sensor mode before enumerating TRY configurations.
+		 */
+		std::optional<unsigned int> resetCode;
+		Size resetSize;
+
+		for (unsigned int code : sensor_->mbusCodes()) {
+			for (const Size &size : sensor_->sizes(code)) {
+				if (!resetCode || resetSize < size) {
+					resetCode = code;
+					resetSize = size;
+				}
+			}
+		}
+
+		if (resetCode) {
+			V4L2SubdeviceFormat resetFormat{};
+			resetFormat.code = *resetCode;
+			resetFormat.size = resetSize;
+
+			ret = setupFormats(&resetFormat, V4L2Subdevice::ActiveFormat);
+			if (ret < 0) {
+				LOG(SimplePipeline, Warning)
+					<< "Failed to reset AtomISP sensor mode before probing: "
+					<< strerror(-ret) << " (" << ret << ")";
+			}
+		}
+	}
+
 	for (unsigned int code : sensor_->mbusCodes()) {
 		for (const Size &size : sensor_->sizes(code))
 			tryPipeline(code, size);
