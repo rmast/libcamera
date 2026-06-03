@@ -650,70 +650,15 @@ int SimpleCameraData::init()
 	 * Generate the list of possible pipeline configurations by trying each
 	 * media bus format and size supported by the sensor.
 	 */
-	if (pipe->atomispQuirks()) {
-		/*
-		 * Some AtomISP + mt9m114 combinations exhibit cumulative shrinking
-		 * of the active format while probing. Reset once to the largest
-		 * available sensor mode before enumerating TRY configurations.
-		 */
-		std::optional<unsigned int> resetCode;
-		Size resetSize;
-
-		for (unsigned int code : sensor_->mbusCodes()) {
-			for (const Size &size : sensor_->sizes(code)) {
-				if (!resetCode || resetSize < size) {
-					resetCode = code;
-					resetSize = size;
-				}
-			}
-		}
-
-		if (resetCode) {
-			V4L2SubdeviceFormat resetFormat{};
-			resetFormat.code = *resetCode;
-			resetFormat.size = resetSize;
-
-			ret = setupFormats(&resetFormat, V4L2Subdevice::ActiveFormat);
-			if (ret < 0) {
-				LOG(SimplePipeline, Warning)
-					<< "Failed to reset AtomISP sensor mode before probing: "
-					<< strerror(-ret) << " (" << ret << ")";
-			}
-		}
-	}
-
-	Size maxEnumeratedSensorSize;
 	for (unsigned int code : sensor_->mbusCodes()) {
-		for (const Size &size : sensor_->sizes(code))
-			maxEnumeratedSensorSize.expandTo(size);
-
-		for (const Size &size : sensor_->sizes(code))
+		const std::vector<Size> sizes = sensor_->sizes(code);
+		for (const Size &size : sizes)
 			tryPipeline(code, size);
-	}
 
-
-	if (configs_.empty() && pipe->atomispQuirks()) {
-		/*
-		 * If no configuration could be derived from sensor enumeration,
-		 * retry probing with a small set of common fallback sizes.
-		 * Keep this confined to AtomISP and only as a last resort.
+		/* AtomISP: no VGA fallback; 640x480 binning mode is known broken
+		 * due to DVS padding mismatch (sensor provides 8px extra, binary
+		 * needs 12px DVS envelope). Only >640x480 sizes are usable.
 		 */
-		const std::vector<Size> fallbackSizes = {
-			Size(1280, 960),
-			Size(1280, 720),
-			Size(1024, 768),
-			Size(960, 720),
-			Size(800, 600),
-			Size(640, 480),
-		};
-
-		LOG(SimplePipeline, Warning)
-			<< "No valid AtomISP configuration from enumerated modes, retrying with fallback sizes";
-
-		for (unsigned int code : sensor_->mbusCodes()) {
-			for (const Size &size : fallbackSizes)
-				tryPipeline(code, size);
-		}
 	}
 
 	if (configs_.empty()) {
@@ -767,24 +712,7 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
 	format.code = code;
 	format.size = size;
 
-	int ret;
-	if (pipe()->atomispQuirks()) {
-		/*
-		 * On some AtomISP paths TRY negotiation under-reports the attainable
-		 * output size. Probe with ACTIVE first to discover usable configs.
-		 */
-		ret = setupFormats(&format, V4L2Subdevice::ActiveFormat);
-		if (ret < 0) {
-			LOG(SimplePipeline, Debug)
-				<< "ACTIVE probing failed for " << V4L2SubdeviceFormat{ code, size, {} }
-				<< ", falling back to TRY";
-			format.code = code;
-			format.size = size;
-			ret = setupFormats(&format, V4L2Subdevice::TryFormat);
-		}
-	} else {
-		ret = setupFormats(&format, V4L2Subdevice::TryFormat);
-	}
+	int ret = setupFormats(&format, V4L2Subdevice::TryFormat);
 	if (ret < 0) {
 		/* Pipeline configuration failed, skip this configuration. */
 		format.code = code;
@@ -808,43 +736,60 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
 		<< "Adding configuration for " << format.size
 		<< " in pixel formats [ "
 		<< utils::join(videoFormats, ", ",
-			       [](const auto &f) {
-				       return f.first.toString();
-			       })
+				       [](const auto &f) {
+					       return f.first.toString();
+				       })
 		<< " ]";
 
-	for (const auto &videoFormat : videoFormats) {
+	auto addConfigurations = [&](const auto &videoFormat) {
 		PixelFormat pixelFormat = videoFormat.first.toPixelFormat(false);
 		if (!pixelFormat) {
 			LOG(SimplePipeline, Debug)
 				<< "Unsupported V4L2 pixel format "
 				<< videoFormat.first.toString();
 
-			continue;
+			return;
 		}
 
-		/*
-		 * On AtomISP, RGB565 previews can show channel-order artifacts in
-		 * generic preview apps. Prefer YUV formats for stable PoC behavior.
-		 */
-		if (pipe()->atomispQuirks() &&
-		    (pixelFormat == formats::RGB565 ||
-		     pixelFormat == formats::RGB565_BE)) {
-			LOG(SimplePipeline, Debug)
-				<< "Skipping " << pixelFormat
-				<< " for AtomISP preview stability";
-			continue;
-		}
-
-		std::vector<Size> captureSizes = { format.size };
-		if (pipe()->atomispQuirks()) {
-			for (const SizeRange &range : videoFormat.second) {
-				if (std::find(captureSizes.begin(), captureSizes.end(), range.max) == captureSizes.end())
-					captureSizes.push_back(range.max);
-			}
-		}
+		std::vector<Size> captureSizes = {
+			pipe()->atomispQuirks() ? size : format.size,
+		};
 
 		for (const Size &captureSize : captureSizes) {
+				/* AtomISP: captureSize here is the sensor output size.
+				 * Binning mode (~648x488) must be skipped due to DVS
+				 * padding mismatch; only full-res (~1296x976) is usable.
+				 */
+				if (pipe()->atomispQuirks() && captureSize.width < 1000) {
+					LOG(SimplePipeline, Debug)
+						<< "Skipping AtomISP binning-mode config for "
+						<< captureSize << "-" << videoFormat.first
+						<< " (binning mode has DVS padding mismatch)";
+					continue;
+				}
+
+				if (pipe()->atomispQuirks()) {
+					V4L2DeviceFormat captureFormat;
+					captureFormat.fourcc = videoFormat.first;
+					captureFormat.size = captureSize;
+
+					/* AtomISP: firmware top/left cropping (up to 12px) plus
+					 * driver padding can shift the output by up to 16px per
+					 * axis relative to the requested sensor size.
+					 */
+					if (video_->tryFormat(&captureFormat) < 0 ||
+					    (std::abs(static_cast<int>(captureFormat.size.width) -
+						     static_cast<int>(captureSize.width)) > 16) ||
+					    (std::abs(static_cast<int>(captureFormat.size.height) -
+						     static_cast<int>(captureSize.height)) > 16)) {
+						LOG(SimplePipeline, Debug)
+							<< "Skipping AtomISP configuration for "
+							<< captureSize << "-" << videoFormat.first
+							<< " (video node reports " << captureFormat << ")";
+						continue;
+					}
+				}
+
 			Configuration config;
 			config.code = code;
 			config.sensorSize = size;
@@ -869,6 +814,43 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
 
 			configs_.push_back(config);
 		}
+	};
+
+	if (pipe()->atomispQuirks()) {
+		static const std::array<uint32_t, 9> preferredFormats = {
+			V4L2_PIX_FMT_UYVY,
+			V4L2_PIX_FMT_YUYV,
+			V4L2_PIX_FMT_NV12,
+			V4L2_PIX_FMT_NV21,
+			V4L2_PIX_FMT_YUV420,
+			V4L2_PIX_FMT_YVU420,
+			V4L2_PIX_FMT_YUV422P,
+			V4L2_PIX_FMT_YUV444,
+			V4L2_PIX_FMT_NV16,
+		};
+
+		std::vector<V4L2PixelFormat> seenFormats;
+		seenFormats.reserve(videoFormats.size());
+
+		for (uint32_t preferredFormat : preferredFormats) {
+			auto it = videoFormats.find(V4L2PixelFormat(preferredFormat));
+			if (it == videoFormats.end())
+				continue;
+
+			addConfigurations(*it);
+			seenFormats.push_back(V4L2PixelFormat(preferredFormat));
+		}
+
+		for (const auto &videoFormat : videoFormats) {
+			if (std::find(seenFormats.begin(), seenFormats.end(), videoFormat.first) !=
+			    seenFormats.end())
+				continue;
+
+			addConfigurations(videoFormat);
+		}
+	} else {
+		for (const auto &videoFormat : videoFormats)
+			addConfigurations(videoFormat);
 	}
 }
 
@@ -970,20 +952,30 @@ int SimpleCameraData::setupFormats(V4L2SubdeviceFormat *format,
 
 			if (format->code != sourceFormat.code ||
 			    format->size != sourceFormat.size) {
-				if (pipe->atomispQuirks() &&
-				    format->code == sourceFormat.code) {
-					int dw = std::abs(static_cast<int>(format->size.width) -
-							  static_cast<int>(sourceFormat.size.width));
-					int dh = std::abs(static_cast<int>(format->size.height) -
-							  static_cast<int>(sourceFormat.size.height));
+					if (pipe->atomispQuirks() &&
+					    format->code == sourceFormat.code) {
+						int dw = std::abs(static_cast<int>(format->size.width) -
+								  static_cast<int>(sourceFormat.size.width));
+						int dh = std::abs(static_cast<int>(format->size.height) -
+								  static_cast<int>(sourceFormat.size.height));
 
-					if (dw <= 8 && dh <= 8) {
-						LOG(SimplePipeline, Debug)
-							<< "Tolerating AtomISP source/sink size delta on "
-							<< source->entity()->name() << ":" << source->index()
-							<< " -> " << sink->entity()->name() << ":" << sink->index()
-							<< " (source " << sourceFormat.size
-							<< ", sink " << format->size << ")";
+						if (dw <= 8 && dh <= 8) {
+							LOG(SimplePipeline, Debug)
+								<< "Tolerating AtomISP source/sink size delta on "
+								<< source->entity()->name() << ":" << source->index()
+								<< " -> " << sink->entity()->name() << ":" << sink->index()
+								<< " (source " << sourceFormat.size
+								<< ", sink " << format->size << ")";
+						} else {
+							LOG(SimplePipeline, Debug)
+								<< "Source '" << source->entity()->name()
+								<< "':" << source->index()
+								<< " produces " << sourceFormat
+								<< ", sink '" << sink->entity()->name()
+								<< "':" << sink->index()
+								<< " requires " << *format;
+							return -EINVAL;
+						}
 					} else {
 						LOG(SimplePipeline, Debug)
 							<< "Source '" << source->entity()->name()
@@ -994,16 +986,6 @@ int SimpleCameraData::setupFormats(V4L2SubdeviceFormat *format,
 							<< " requires " << *format;
 						return -EINVAL;
 					}
-				} else {
-					LOG(SimplePipeline, Debug)
-						<< "Source '" << source->entity()->name()
-						<< "':" << source->index()
-						<< " produces " << sourceFormat
-						<< ", sink '" << sink->entity()->name()
-						<< "':" << sink->index()
-						<< " requires " << *format;
-					return -EINVAL;
-				}
 			}
 		}
 
@@ -1369,11 +1351,33 @@ CameraConfiguration::Status SimpleCameraConfiguration::validate()
 	 * without upscaling.
 	 */
 	const SimpleCameraData::Configuration *maxPipeConfig = nullptr;
+	const SimpleCameraData::Configuration *maxPipeConfigNonRaw = nullptr;
 	pipeConfig_ = nullptr;
+	const bool requireNonRawCapture =
+		data_->pipe()->atomispQuirks() && maxRawStreamSize.isNull();
+	auto atomispCaptureFormatScore = [](PixelFormat format) {
+		if (format == PixelFormat{ V4L2_PIX_FMT_UYVY })
+			return 0;
+		if (format == PixelFormat{ V4L2_PIX_FMT_YUYV })
+			return 1;
+
+		return -1;
+	};
 
 	for (const SimpleCameraData::Configuration *pipeConfig : *configs) {
 		const Size &captureSize = pipeConfig->captureSize;
 		const Size &maxOutputSize = pipeConfig->outputSizes.max;
+		const bool captureIsRaw =
+			BayerFormat::fromPixelFormat(pipeConfig->captureFormat).isValid();
+		const int captureFormatScore =
+			atomispCaptureFormatScore(pipeConfig->captureFormat);
+
+		if (!captureIsRaw && (!requireNonRawCapture || captureFormatScore >= 0) &&
+		    (!maxPipeConfigNonRaw || maxPipeConfigNonRaw->captureSize < captureSize))
+			maxPipeConfigNonRaw = pipeConfig;
+
+		if (requireNonRawCapture && (captureIsRaw || captureFormatScore < 0))
+			continue;
 
 		if (maxOutputSize.width >= maxProcessedStreamSize.width &&
 		    maxOutputSize.height >= maxProcessedStreamSize.height &&
@@ -1388,8 +1392,12 @@ CameraConfiguration::Status SimpleCameraConfiguration::validate()
 	}
 
 	/* If no configuration was large enough, select the largest one. */
-	if (!pipeConfig_)
-		pipeConfig_ = maxPipeConfig;
+	if (!pipeConfig_) {
+		if (requireNonRawCapture && maxPipeConfigNonRaw)
+			pipeConfig_ = maxPipeConfigNonRaw;
+		else
+			pipeConfig_ = maxPipeConfig;
+	}
 
 	LOG(SimplePipeline, Debug)
 		<< "Picked "
@@ -1636,10 +1644,34 @@ SimplePipelineHandler::generateConfiguration(Camera *camera, Span<const StreamRo
 	 *
 	 * \todo Implement a better way to pick the default format
 	 */
+		auto pickDefaultFormat = [&](const auto &formats, bool processed) {
+			if (data->pipe()->atomispQuirks() && processed) {
+			static const std::array<PixelFormat, 9> preferredFormats = {
+				PixelFormat{ V4L2_PIX_FMT_UYVY },
+				PixelFormat{ V4L2_PIX_FMT_YUYV },
+				PixelFormat{ V4L2_PIX_FMT_NV12 },
+				PixelFormat{ V4L2_PIX_FMT_NV21 },
+				PixelFormat{ V4L2_PIX_FMT_YUV420 },
+				PixelFormat{ V4L2_PIX_FMT_YVU420 },
+				PixelFormat{ V4L2_PIX_FMT_YUV422P },
+				PixelFormat{ V4L2_PIX_FMT_YUV444 },
+				PixelFormat{ V4L2_PIX_FMT_NV16 },
+			};
+
+			for (const PixelFormat &preferredFormat : preferredFormats) {
+				auto it = formats.find(preferredFormat);
+				if (it != formats.end())
+					return it->first;
+			}
+		}
+
+		return formats.begin()->first;
+	};
+
 	for (StreamRole role : roles) {
 		const auto &formats = (role == StreamRole::Raw ? rawFormats : processedFormats);
 		StreamConfiguration cfg{ StreamFormats{ formats } };
-		cfg.pixelFormat = formats.begin()->first;
+		cfg.pixelFormat = pickDefaultFormat(formats, role != StreamRole::Raw);
 		cfg.size = formats.begin()->second[0].max;
 
 		config->addConfiguration(cfg);
@@ -1684,7 +1716,8 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 	 * format is itself a Bayer format. Some pipelines legitimately change media
 	 * bus codes while keeping a non-Bayer capture node format.
 	 */
-	if (format.code != pipeConfig->code) {
+	if (format.code != pipeConfig->code &&
+	    BayerFormat::fromPixelFormat(pipeConfig->captureFormat).isValid()) {
 		BayerFormat cfgBayer = BayerFormat::fromPixelFormat(pipeConfig->captureFormat);
 		if (cfgBayer.isValid()) {
 			cfgBayer.order = data->sensor_->bayerOrder(config->combinedTransform());
@@ -1694,9 +1727,11 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 		}
 	}
 
+	Size captureSize = pipeConfig->captureSize;
+	bool atomispSizeAdjusted = false;
 	V4L2DeviceFormat captureFormat;
 	captureFormat.fourcc = videoFormat;
-	captureFormat.size = pipeConfig->captureSize;
+	captureFormat.size = captureSize;
 
 	ret = video->setFormat(&captureFormat);
 	if (ret)
@@ -1708,13 +1743,32 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 		return -EINVAL;
 	}
 
-	if (captureFormat.fourcc != videoFormat ||
-	    captureFormat.size != pipeConfig->captureSize) {
+	if (captureFormat.fourcc != videoFormat) {
 		LOG(SimplePipeline, Error)
 			<< "Unable to configure capture in "
-			<< pipeConfig->captureSize << "-" << videoFormat
+			<< captureSize << "-" << videoFormat
 			<< " (got " << captureFormat << ")";
 		return -EINVAL;
+	}
+
+	if (captureFormat.size != captureSize) {
+		if (data->pipe()->atomispQuirks() &&
+		    std::abs(static_cast<int>(captureFormat.size.width) -
+			     static_cast<int>(captureSize.width)) <= 16 &&
+		    std::abs(static_cast<int>(captureFormat.size.height) -
+			     static_cast<int>(captureSize.height)) <= 16) {
+			LOG(SimplePipeline, Debug)
+				<< "Tolerating AtomISP capture size delta: requested "
+				<< captureSize << ", got " << captureFormat.size;
+			captureSize = captureFormat.size;
+			atomispSizeAdjusted = true;
+		} else {
+			LOG(SimplePipeline, Error)
+				<< "Unable to configure capture in "
+				<< captureSize << "-" << videoFormat
+				<< " (got " << captureFormat << ")";
+			return -EINVAL;
+		}
 	}
 
 	/* Configure the converter if needed. */
@@ -1728,6 +1782,19 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 
 		cfg.setStream(&data->streams_[i]);
 
+		/* AtomISP: ISP crops top/left border, so actual output is smaller
+		 * than the sensor size. Update the stream config so the application
+		 * uses the correct dimensions, stride, and buffer size.
+		 */
+		if (atomispSizeAdjusted && !rawStream) {
+			LOG(SimplePipeline, Debug)
+				<< "Updating AtomISP stream config from " << cfg.size
+				<< " to " << captureSize;
+			cfg.size = captureSize;
+			cfg.stride = captureFormat.planes[0].bpl;
+			cfg.frameSize = captureFormat.planes[0].size;
+		}
+
 		if (data->useConversion_ && !rawStream)
 			outputCfgs.push_back(cfg);
 
@@ -1740,7 +1807,7 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 
 	StreamConfiguration inputCfg;
 	inputCfg.pixelFormat = videoFormat.toPixelFormat();
-	inputCfg.size = pipeConfig->captureSize;
+	inputCfg.size = captureSize;
 	inputCfg.stride = captureFormat.planes[0].bpl;
 	inputCfg.bufferCount = kNumInternalBuffers;
 
