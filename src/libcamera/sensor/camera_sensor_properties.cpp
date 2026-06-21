@@ -325,6 +325,33 @@ const CameraSensorProperties *CameraSensorProperties::get(const std::string &sen
 				.hblankDelay = 3
 			},
 		} },
+		{ "mt9m114", {
+			/*
+			 * The mt9m114 has a 1/6" optical format with
+			 * 1296x976 active pixels and 1.9um x 1.9um pixel size.
+			 * The sensor firmware pipeline introduces 2 frames of
+			 * exposure delay and 1 frame of gain delay.
+			 */
+			.unitCellSize = { 1900, 1900 },
+			.testPatternModes = {
+				{ controls::draft::TestPatternModeOff, 0 },
+				{ controls::draft::TestPatternModeSolidColor, 1 },
+				{ controls::draft::TestPatternModeColorBars, 4 },
+				{ controls::draft::TestPatternModeColorBarsFadeToGray, 8 },
+				/*
+				 * No corresponding libcamera test pattern mode for:
+				 *  5: "Pseudo-Random"
+				 * 10: "Walking Ones 10-bit"
+				 * 11: "Walking Ones 8-bit"
+				 */
+			},
+			.sensorDelays = {
+				.exposureDelay = 2,
+				.gainDelay = 1,
+				.vblankDelay = 2,
+				.hblankDelay = 2
+			},
+		} },
 		{ "ov2685", {
 			.unitCellSize = { 1750, 1750 },
 			.testPatternModes = {
