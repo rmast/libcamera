@@ -2,7 +2,7 @@
 
 /build/
 /patches/
-
+stage/
 *.patch
 *.pyc
 __pycache__/

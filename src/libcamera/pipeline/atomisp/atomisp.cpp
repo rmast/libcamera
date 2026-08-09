@@ -3,11 +3,12 @@
  * Copyright (C) 2020, Laurent Pinchart
  * Copyright (C) 2019, Martijn Braam
  *
- * Pipeline handler for simple pipelines
+ * Pipeline handler for Intel AtomISP (ISP2400/ISP2401) camera pipelines
  */
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <iterator>
 #include <list>
 #include <map>
@@ -46,20 +47,21 @@
 #include "libcamera/internal/media_device.h"
 #include "libcamera/internal/pipeline_handler.h"
 #include "libcamera/internal/request.h"
+#include "libcamera/internal/mapped_framebuffer.h"
 #include "libcamera/internal/software_isp/software_isp.h"
 #include "libcamera/internal/v4l2_subdevice.h"
 #include "libcamera/internal/v4l2_videodevice.h"
 
 namespace libcamera {
 
-LOG_DEFINE_CATEGORY(SimplePipeline)
+LOG_DEFINE_CATEGORY(AtomispPipeline)
 
 /* -----------------------------------------------------------------------------
  *
  * Overview
  * --------
  *
- * The SimplePipelineHandler relies on generic kernel APIs to control a camera
+ * The AtomispPipelineHandler relies on generic kernel APIs to control a camera
  * device, without any device-specific code and with limited device-specific
  * static data.
  *
@@ -96,16 +98,16 @@ LOG_DEFINE_CATEGORY(SimplePipeline)
  *
  * Once the camera data instances have been created, the match() function
  * creates a V4L2VideoDevice or V4L2Subdevice instance for each entity used by
- * any of the cameras and stores them in SimplePipelineHandler::entities_,
- * accessible by the SimpleCameraData class through the
- * SimplePipelineHandler::subdev() and SimplePipelineHandler::video() functions.
+ * any of the cameras and stores them in AtomispPipelineHandler::entities_,
+ * accessible by the AtomispCameraData class through the
+ * AtomispPipelineHandler::subdev() and AtomispPipelineHandler::video() functions.
  * This avoids duplication of subdev instances between different cameras when
  * the same entity is used in multiple paths.
  *
  * Finally, all camera data instances are initialized to gather information
  * about the possible pipeline configurations for the corresponding camera. If
  * valid pipeline configurations are found, a Camera is registered for the
- * SimpleCameraData instance.
+ * AtomispCameraData instance.
  *
  * Pipeline Traversal
  * ------------------
@@ -122,7 +124,7 @@ LOG_DEFINE_CATEGORY(SimplePipeline)
  * setup custom routes. This can be extended if needed.
  *
  * The shortest path between the camera sensor and a video node is stored in
- * SimpleCameraData::entities_ as a list of SimpleCameraData::Entity structures,
+ * AtomispCameraData::entities_ as a list of AtomispCameraData::Entity structures,
  * ordered along the data path from the camera sensor to the video node. The
  * Entity structure stores a pointer to the MediaEntity, as well as information
  * about how it is connected in that particular path for later usage when
@@ -150,8 +152,8 @@ LOG_DEFINE_CATEGORY(SimplePipeline)
  * sensor. Upon reaching the video node, the pixel formats compatible with the
  * media bus format are enumerated. Each combination of the input media bus
  * format, output pixel format and output size are recorded in an instance of
- * the SimpleCameraData::Configuration structure, stored in the
- * SimpleCameraData::configs_ vector.
+ * the AtomispCameraData::Configuration structure, stored in the
+ * AtomispCameraData::configs_ vector.
  *
  * Format Conversion and Scaling
  * -----------------------------
@@ -163,7 +165,7 @@ LOG_DEFINE_CATEGORY(SimplePipeline)
  * present, the pipeline handler enumerates, for each pipeline configuration,
  * the pixel formats and sizes that the converter can produce for the output of
  * the capture video node, and stores the information in the outputFormats and
- * outputSizes of the SimpleCameraData::Configuration structure.
+ * outputSizes of the AtomispCameraData::Configuration structure.
  *
  * Concurrent Access to Cameras
  * ----------------------------
@@ -180,7 +182,7 @@ LOG_DEFINE_CATEGORY(SimplePipeline)
  * can thus be used concurrently by multiple cameras, as long as pads are
  * distinct.
  *
- * A resource reservation mechanism is implemented by the SimplePipelineHandler
+ * A resource reservation mechanism is implemented by the AtomispPipelineHandler
  * acquirePipeline() and releasePipeline() functions to manage exclusive access
  * to pads. A camera reserves all the pads present in its pipeline when it is
  * started, and the start() function returns an error if any of the required
@@ -188,10 +190,10 @@ LOG_DEFINE_CATEGORY(SimplePipeline)
  * are released.
  */
 
-class SimplePipelineHandler;
+class AtomispPipelineHandler;
 
-struct SimpleFrameInfo {
-	SimpleFrameInfo(uint32_t f, Request *r, bool m)
+struct AtomispFrameInfo {
+	AtomispFrameInfo(uint32_t f, Request *r, bool m)
 		: frame(f), request(r), metadataRequired(m), metadataProcessed(false)
 	{
 	}
@@ -202,37 +204,37 @@ struct SimpleFrameInfo {
 	bool metadataProcessed;
 };
 
-class SimpleFrames
+class AtomispFrames
 {
 public:
 	void create(Request *request, bool metadataRequested);
 	void destroy(uint32_t frame);
 	void clear();
 
-	SimpleFrameInfo *find(uint32_t frame);
+	AtomispFrameInfo *find(uint32_t frame);
 
 private:
-	std::map<uint32_t, SimpleFrameInfo> frameInfo_;
+	std::map<uint32_t, AtomispFrameInfo> frameInfo_;
 };
 
-void SimpleFrames::create(Request *request, bool metadataRequired)
+void AtomispFrames::create(Request *request, bool metadataRequired)
 {
 	const uint32_t frame = request->sequence();
 	auto [it, inserted] = frameInfo_.try_emplace(frame, frame, request, metadataRequired);
 	ASSERT(inserted);
 }
 
-void SimpleFrames::destroy(uint32_t frame)
+void AtomispFrames::destroy(uint32_t frame)
 {
 	frameInfo_.erase(frame);
 }
 
-void SimpleFrames::clear()
+void AtomispFrames::clear()
 {
 	frameInfo_.clear();
 }
 
-SimpleFrameInfo *SimpleFrames::find(uint32_t frame)
+AtomispFrameInfo *AtomispFrames::find(uint32_t frame)
 {
 	auto info = frameInfo_.find(frame);
 	if (info == frameInfo_.end())
@@ -240,7 +242,7 @@ SimpleFrameInfo *SimpleFrames::find(uint32_t frame)
 	return &info->second;
 }
 
-struct SimplePipelineInfo {
+struct AtomispDriverInfo {
 	const char *driver;
 	/*
 	 * Each converter in the list contains the name
@@ -257,16 +259,9 @@ struct SimplePipelineInfo {
 
 namespace {
 
-static const SimplePipelineInfo supportedDevices[] = {
-	{ "dcmipp", {}, false },
-	{ "imx7-csi", { { "pxp", 1 } }, true },
-	{ "intel-ipu6", {}, true },
-	{ "intel-ipu7", {}, true },
-	{ "j721e-csi2rx", {}, true },
-	{ "mtk-seninf", { { "mtk-mdp", 3 } }, false },
-	{ "mxc-isi", {}, false },
-	{ "qcom-camss", {}, true },
-	{ "sun6i-csi", {}, false },
+static const AtomispDriverInfo supportedDevices[] = {
+	{ "atomisp", {}, false },
+	{ "atomisp-isp2", {}, false },
 };
 
 bool isRaw(const StreamConfiguration &cfg)
@@ -277,15 +272,163 @@ bool isRaw(const StreamConfiguration &cfg)
 
 } /* namespace */
 
-class SimpleCameraData : public Camera::Private
+/*
+ * Luminance-based AE loop for the AtomISP path. AtomISP outputs YUV, so
+ * the debayer software-ISP path is not applicable. Instead, sample the Y
+ * channel of each UYVY capture buffer and apply the same proportional
+ * controller used by the soft-IPA AGC to adjust sensor exposure and gain.
+ */
+class AtomispAeLoop
 {
 public:
-	SimpleCameraData(SimplePipelineHandler *pipe,
+	Signal<const ControlList &> setSensorControls;
+
+	bool configure(const CameraSensor *sensor,
+		       const PixelFormat &format, const Size &size);
+	void processBuffer(uint32_t sequence, FrameBuffer *buffer);
+
+private:
+	void updateExposure(double msv);
+
+	const CameraSensor *sensor_ = nullptr;
+	PixelFormat format_;
+	Size size_;
+
+	int32_t exposure_ = 0, exposureMin_ = 0, exposureMax_ = 0;
+	double gain_ = 1.0, gainMin_ = 1.0, gainMax_ = 1.0;
+
+	/* Process every kInterval frames to keep CPU load low */
+	static constexpr unsigned int kInterval = 3;
+	/* Match the soft-IPA AGC controller constants */
+	static constexpr double kOptimalMsv = 2.5;
+	static constexpr double kSatisfactory = 0.2;
+	static constexpr double kPGain = 0.04;
+	static constexpr double kMaxStep = 0.15;
+};
+
+bool AtomispAeLoop::configure(const CameraSensor *sensor,
+			      const PixelFormat &format, const Size &size)
+{
+	sensor_ = sensor;
+	format_ = format;
+	size_ = size;
+
+	const ControlInfoMap &ctrls = sensor->controls();
+
+	auto itExp = ctrls.find(V4L2_CID_EXPOSURE);
+	if (itExp == ctrls.end()) {
+		LOG(AtomispPipeline, Warning) << "AtomISP AE: no exposure control";
+		return false;
+	}
+	exposureMin_ = itExp->second.min().get<int32_t>();
+	exposureMax_ = itExp->second.max().get<int32_t>();
+	exposure_ = itExp->second.def().get<int32_t>();
+
+	auto itGain = ctrls.find(V4L2_CID_ANALOGUE_GAIN);
+	if (itGain == ctrls.end()) {
+		LOG(AtomispPipeline, Warning) << "AtomISP AE: no gain control";
+		return false;
+	}
+	gainMin_ = itGain->second.min().get<int32_t>();
+	gainMax_ = itGain->second.max().get<int32_t>();
+	gain_ = itGain->second.def().get<int32_t>();
+
+	LOG(AtomispPipeline, Debug)
+		<< "AtomISP AE configured: exp [" << exposureMin_ << ".."
+		<< exposureMax_ << "] def=" << exposure_
+		<< " gain [" << gainMin_ << ".." << gainMax_ << "] def=" << gain_;
+
+	return true;
+}
+
+void AtomispAeLoop::processBuffer(uint32_t sequence, FrameBuffer *buffer)
+{
+	if (sequence % kInterval != 0)
+		return;
+
+	/* Only UYVY is handled: Y bytes at odd byte positions within each row */
+	if (format_ != formats::UYVY)
+		return;
+
+	MappedFrameBuffer in(buffer, MappedFrameBuffer::MapFlag::Read);
+	if (!in.isValid()) {
+		LOG(AtomispPipeline, Warning) << "AtomISP AE: mmap failed";
+		return;
+	}
+
+	const uint8_t *data = in.planes()[0].begin();
+	/* UYVY: 2 bytes per pixel, so stride = width * 2 */
+	const unsigned int stride = size_.width * 2;
+
+	/*
+	 * Sample Y over a regular grid: every 8th row, every 64th pixel.
+	 * In UYVY the byte layout per two pixels is [U0 Y0 V0 Y1], so Y bytes
+	 * are at odd positions: 1, 3, 5 ... Step 128 bytes = 64 pixels.
+	 */
+	uint64_t ySum = 0;
+	unsigned int count = 0;
+	for (unsigned int row = 0; row < size_.height; row += 8) {
+		const uint8_t *line = data + row * stride;
+		for (unsigned int col = 1; col < stride; col += 128) {
+			ySum += line[col];
+			count++;
+		}
+	}
+
+	if (!count)
+		return;
+
+	/* Scale mean Y (0-255) to MSV range (0-5) matching the soft-IPA AGC */
+	double msv = static_cast<double>(ySum) / count * 5.0 / 255.0;
+	updateExposure(msv);
+}
+
+void AtomispAeLoop::updateExposure(double msv)
+{
+	double error = kOptimalMsv - msv;
+
+	if (std::abs(error) <= kSatisfactory)
+		return;
+
+	double step = std::clamp(error * kPGain, -kMaxStep, kMaxStep);
+	double factor = 1.0 + step;
+
+	if (factor > 1.0) {
+		/* Too dark: raise exposure first, then gain */
+		if (exposure_ < exposureMax_) {
+			int32_t next = static_cast<int32_t>(exposure_ * factor);
+			exposure_ = std::max(next, exposure_ + 1);
+		} else {
+			gain_ = std::min(gain_ * factor, gainMax_);
+		}
+	} else {
+		/* Too bright: lower gain first, then exposure */
+		if (gain_ > gainMin_) {
+			gain_ = std::max(gain_ * factor, gainMin_);
+		} else {
+			int32_t next = static_cast<int32_t>(exposure_ * factor);
+			exposure_ = std::min(next, exposure_ - 1);
+		}
+	}
+
+	exposure_ = std::clamp(exposure_, exposureMin_, exposureMax_);
+	gain_ = std::clamp(gain_, gainMin_, gainMax_);
+
+	ControlList sensorCtrls(sensor_->controls());
+	sensorCtrls.set(V4L2_CID_EXPOSURE, exposure_);
+	sensorCtrls.set(V4L2_CID_ANALOGUE_GAIN, static_cast<int32_t>(gain_));
+	setSensorControls.emit(sensorCtrls);
+}
+
+class AtomispCameraData : public Camera::Private
+{
+public:
+	AtomispCameraData(AtomispPipelineHandler *pipe,
 			 unsigned int numStreams,
 			 MediaEntity *sensor);
 
 	bool isValid() const { return sensor_ != nullptr; }
-	SimplePipelineHandler *pipe();
+	AtomispPipelineHandler *pipe();
 
 	int init();
 	int setupLinks();
@@ -361,7 +504,8 @@ public:
 
 	std::unique_ptr<Converter> converter_;
 	std::unique_ptr<SoftwareIsp> swIsp_;
-	SimpleFrames frameInfo_;
+	std::unique_ptr<AtomispAeLoop> atomispAe_;
+	AtomispFrames frameInfo_;
 
 	void setSensorControls(const ControlList &sensorControls);
 
@@ -377,14 +521,14 @@ private:
 	void metadataReady(uint32_t frame, const ControlList &metadata);
 };
 
-class SimpleCameraConfiguration : public CameraConfiguration
+class AtomispCameraConfiguration : public CameraConfiguration
 {
 public:
-	SimpleCameraConfiguration(Camera *camera, SimpleCameraData *data);
+	AtomispCameraConfiguration(Camera *camera, AtomispCameraData *data);
 
 	Status validate() override;
 
-	const SimpleCameraData::Configuration *pipeConfig() const
+	const AtomispCameraData::Configuration *pipeConfig() const
 	{
 		return pipeConfig_;
 	}
@@ -397,22 +541,22 @@ private:
 	static constexpr unsigned int kNumBuffersMax = 32;
 
 	/*
-	 * The SimpleCameraData instance is guaranteed to be valid as long as
+	 * The AtomispCameraData instance is guaranteed to be valid as long as
 	 * the corresponding Camera instance is valid. In order to borrow a
 	 * reference to the camera data, store a new reference to the camera.
 	 */
 	std::shared_ptr<Camera> camera_;
-	SimpleCameraData *data_;
+	AtomispCameraData *data_;
 
-	const SimpleCameraData::Configuration *pipeConfig_;
+	const AtomispCameraData::Configuration *pipeConfig_;
 	bool needConversion_;
 	Transform combinedTransform_;
 };
 
-class SimplePipelineHandler : public PipelineHandler
+class AtomispPipelineHandler : public PipelineHandler
 {
 public:
-	SimplePipelineHandler(CameraManager *manager);
+	AtomispPipelineHandler(CameraManager *manager);
 
 	std::unique_ptr<CameraConfiguration> generateConfiguration(Camera *camera,
 								   Span<const StreamRole> roles) override;
@@ -442,23 +586,23 @@ private:
 	struct EntityData {
 		std::unique_ptr<V4L2VideoDevice> video;
 		std::unique_ptr<V4L2Subdevice> subdev;
-		std::map<const MediaPad *, SimpleCameraData *> owners;
+		std::map<const MediaPad *, AtomispCameraData *> owners;
 	};
 
-	SimpleCameraData *cameraData(Camera *camera)
+	AtomispCameraData *cameraData(Camera *camera)
 	{
-		return static_cast<SimpleCameraData *>(camera->_d());
+		return static_cast<AtomispCameraData *>(camera->_d());
 	}
 
 	bool matchDevice(std::shared_ptr<MediaDevice> media,
-			 const SimplePipelineInfo &info,
+			 const AtomispDriverInfo &info,
 			 DeviceEnumerator *enumerator);
 
 	std::vector<MediaEntity *> locateSensors(MediaDevice *media);
 	static int resetRoutingTable(V4L2Subdevice *subdev);
 
-	const MediaPad *acquirePipeline(SimpleCameraData *data);
-	void releasePipeline(SimpleCameraData *data);
+	const MediaPad *acquirePipeline(AtomispCameraData *data);
+	void releasePipeline(AtomispCameraData *data);
 
 	std::map<const MediaEntity *, EntityData> entities_;
 
@@ -471,7 +615,7 @@ private:
  * Camera Data
  */
 
-SimpleCameraData::SimpleCameraData(SimplePipelineHandler *pipe,
+AtomispCameraData::AtomispCameraData(AtomispPipelineHandler *pipe,
 				   unsigned int numStreams,
 				   MediaEntity *sensor)
 	: Camera::Private(pipe), streams_(numStreams), rawStream_(nullptr)
@@ -503,7 +647,7 @@ SimpleCameraData::SimpleCameraData(SimplePipelineHandler *pipe,
 
 		/* Found the capture device. */
 		if (entity->function() == MEDIA_ENT_F_IO_V4L) {
-			LOG(SimplePipeline, Debug)
+			LOG(AtomispPipeline, Debug)
 				<< "Found capture device " << entity->name();
 			video = entity;
 			break;
@@ -577,7 +721,7 @@ SimpleCameraData::SimpleCameraData(SimplePipelineHandler *pipe,
 	};
 	delayedCtrls_ = std::make_unique<DelayedControls>(sensor_->device(), params);
 
-	LOG(SimplePipeline, Debug)
+	LOG(AtomispPipeline, Debug)
 		<< "Found pipeline: "
 		<< utils::join(entities_, " -> ",
 			       [](const Entity &e) {
@@ -592,14 +736,14 @@ SimpleCameraData::SimpleCameraData(SimplePipelineHandler *pipe,
 			       });
 }
 
-SimplePipelineHandler *SimpleCameraData::pipe()
+AtomispPipelineHandler *AtomispCameraData::pipe()
 {
-	return static_cast<SimplePipelineHandler *>(Camera::Private::pipe());
+	return static_cast<AtomispPipelineHandler *>(Camera::Private::pipe());
 }
 
-int SimpleCameraData::init()
+int AtomispCameraData::init()
 {
-	SimplePipelineHandler *pipe = SimpleCameraData::pipe();
+	AtomispPipelineHandler *pipe = AtomispCameraData::pipe();
 	int ret;
 
 	/* Open the converter, if any. */
@@ -607,12 +751,12 @@ int SimpleCameraData::init()
 	if (converter) {
 		converter_ = ConverterFactoryBase::create(converter);
 		if (!converter_) {
-			LOG(SimplePipeline, Warning)
+			LOG(AtomispPipeline, Warning)
 				<< "Failed to create converter, disabling format conversion";
 			converter_.reset();
 		} else {
-			converter_->inputBufferReady.connect(this, &SimpleCameraData::conversionInputDone);
-			converter_->outputBufferReady.connect(this, &SimpleCameraData::conversionOutputDone);
+			converter_->inputBufferReady.connect(this, &AtomispCameraData::conversionInputDone);
+			converter_->outputBufferReady.connect(this, &AtomispCameraData::conversionOutputDone);
 		}
 	}
 
@@ -622,15 +766,15 @@ int SimpleCameraData::init()
 	if (!converter_ && pipe->swIspEnabled()) {
 		swIsp_ = std::make_unique<SoftwareIsp>(pipe, sensor_.get(), &controlInfo_);
 		if (!swIsp_->isValid()) {
-			LOG(SimplePipeline, Warning)
+			LOG(AtomispPipeline, Warning)
 				<< "Failed to create software ISP, disabling software debayering";
 			swIsp_.reset();
 		} else {
-			swIsp_->inputBufferReady.connect(this, &SimpleCameraData::conversionInputDone);
-			swIsp_->outputBufferReady.connect(this, &SimpleCameraData::conversionOutputDone);
-			swIsp_->ispStatsReady.connect(this, &SimpleCameraData::ispStatsReady);
-			swIsp_->metadataReady.connect(this, &SimpleCameraData::metadataReady);
-			swIsp_->setSensorControls.connect(this, &SimpleCameraData::setSensorControls);
+			swIsp_->inputBufferReady.connect(this, &AtomispCameraData::conversionInputDone);
+			swIsp_->outputBufferReady.connect(this, &AtomispCameraData::conversionOutputDone);
+			swIsp_->ispStatsReady.connect(this, &AtomispCameraData::ispStatsReady);
+			swIsp_->metadataReady.connect(this, &AtomispCameraData::metadataReady);
+			swIsp_->setSensorControls.connect(this, &AtomispCameraData::setSensorControls);
 		}
 	}
 
@@ -661,7 +805,7 @@ int SimpleCameraData::init()
 	}
 
 	if (configs_.empty()) {
-		LOG(SimplePipeline, Error) << "No valid configuration found";
+		LOG(AtomispPipeline, Error) << "No valid configuration found";
 		return -EINVAL;
 	}
 
@@ -682,7 +826,7 @@ int SimpleCameraData::init()
 		if (!sd || !sd->supportsFrameStartEvent())
 			continue;
 
-		LOG(SimplePipeline, Debug)
+		LOG(AtomispPipeline, Debug)
 			<< "Using frameStart signal from '"
 			<< entity.entity->name() << "'";
 		frameStartEmitter_ = sd;
@@ -701,7 +845,7 @@ int SimpleCameraData::init()
  * pixel formats compatible with the media bus code. For each pixel format, store
  * a full pipeline configuration in the configs_ vector.
  */
-void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
+void AtomispCameraData::tryPipeline(unsigned int code, const Size &size)
 {
 	/*
 	 * Propagate the format through the pipeline, and enumerate the
@@ -716,7 +860,7 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
 		/* Pipeline configuration failed, skip this configuration. */
 		format.code = code;
 		format.size = size;
-		LOG(SimplePipeline, Debug)
+		LOG(AtomispPipeline, Debug)
 			<< "Sensor format " << format
 			<< " not supported for this pipeline";
 		return;
@@ -725,13 +869,13 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
 	V4L2VideoDevice::Formats videoFormats = video_->formats(format.code);
 	if (videoFormats.empty() && pipe()->atomispQuirks() &&
 	    !video_->caps().hasMediaController()) {
-		LOG(SimplePipeline, Warning)
+		LOG(AtomispPipeline, Warning)
 			<< "Video node " << video_->deviceNode()
 			<< " does not support media-bus code filtering, retrying format enumeration without code";
 		videoFormats = video_->formats();
 	}
 
-	LOG(SimplePipeline, Debug)
+	LOG(AtomispPipeline, Debug)
 		<< "Adding configuration for " << format.size
 		<< " in pixel formats [ "
 		<< utils::join(videoFormats, ", ",
@@ -743,7 +887,7 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
 	auto addConfigurations = [&](const auto &videoFormat) {
 		PixelFormat pixelFormat = videoFormat.first.toPixelFormat(false);
 		if (!pixelFormat) {
-			LOG(SimplePipeline, Debug)
+			LOG(AtomispPipeline, Debug)
 				<< "Unsupported V4L2 pixel format "
 				<< videoFormat.first.toString();
 
@@ -760,7 +904,7 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
 				 * padding mismatch; only full-res (~1296x976) is usable.
 				 */
 				if (pipe()->atomispQuirks() && captureSize.width < 1000) {
-					LOG(SimplePipeline, Debug)
+					LOG(AtomispPipeline, Debug)
 						<< "Skipping AtomISP binning-mode config for "
 						<< captureSize << "-" << videoFormat.first
 						<< " (binning mode has DVS padding mismatch)";
@@ -781,7 +925,7 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
 						     static_cast<int>(captureSize.width)) > 16) ||
 					    (std::abs(static_cast<int>(captureFormat.size.height) -
 						     static_cast<int>(captureSize.height)) > 16)) {
-						LOG(SimplePipeline, Debug)
+						LOG(AtomispPipeline, Debug)
 							<< "Skipping AtomISP configuration for "
 							<< captureSize << "-" << videoFormat.first
 							<< " (video node reports " << captureFormat << ")";
@@ -853,7 +997,7 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
 	}
 }
 
-int SimpleCameraData::setupLinks()
+int AtomispCameraData::setupLinks()
 {
 	int ret;
 
@@ -870,7 +1014,7 @@ int SimpleCameraData::setupLinks()
 	 */
 	MediaLink *sinkLink = nullptr;
 
-	for (SimpleCameraData::Entity &e : entities_) {
+	for (AtomispCameraData::Entity &e : entities_) {
 		if (!sinkLink) {
 			sinkLink = e.sourceLink;
 			continue;
@@ -911,11 +1055,11 @@ int SimpleCameraData::setupLinks()
 	return 0;
 }
 
-int SimpleCameraData::setupFormats(V4L2SubdeviceFormat *format,
+int AtomispCameraData::setupFormats(V4L2SubdeviceFormat *format,
 				   V4L2Subdevice::Whence whence,
 				   Transform transform)
 {
-	SimplePipelineHandler *pipe = SimpleCameraData::pipe();
+	AtomispPipelineHandler *pipe = AtomispCameraData::pipe();
 	int ret;
 
 	/*
@@ -959,14 +1103,14 @@ int SimpleCameraData::setupFormats(V4L2SubdeviceFormat *format,
 								  static_cast<int>(sourceFormat.size.height));
 
 						if (dw <= 8 && dh <= 8) {
-							LOG(SimplePipeline, Debug)
+							LOG(AtomispPipeline, Debug)
 								<< "Tolerating AtomISP source/sink size delta on "
 								<< source->entity()->name() << ":" << source->index()
 								<< " -> " << sink->entity()->name() << ":" << sink->index()
 								<< " (source " << sourceFormat.size
 								<< ", sink " << format->size << ")";
 						} else {
-							LOG(SimplePipeline, Debug)
+							LOG(AtomispPipeline, Debug)
 								<< "Source '" << source->entity()->name()
 								<< "':" << source->index()
 								<< " produces " << sourceFormat
@@ -976,7 +1120,7 @@ int SimpleCameraData::setupFormats(V4L2SubdeviceFormat *format,
 							return -EINVAL;
 						}
 					} else {
-						LOG(SimplePipeline, Debug)
+						LOG(AtomispPipeline, Debug)
 							<< "Source '" << source->entity()->name()
 							<< "':" << source->index()
 							<< " produces " << sourceFormat
@@ -988,7 +1132,7 @@ int SimpleCameraData::setupFormats(V4L2SubdeviceFormat *format,
 			}
 		}
 
-		LOG(SimplePipeline, Debug)
+		LOG(AtomispPipeline, Debug)
 			<< "Link " << *link << ": configured with format "
 			<< *format;
 	}
@@ -996,9 +1140,9 @@ int SimpleCameraData::setupFormats(V4L2SubdeviceFormat *format,
 	return 0;
 }
 
-void SimpleCameraData::imageBufferReady(FrameBuffer *buffer)
+void AtomispCameraData::imageBufferReady(FrameBuffer *buffer)
 {
-	SimplePipelineHandler *pipe = SimpleCameraData::pipe();
+	AtomispPipelineHandler *pipe = AtomispCameraData::pipe();
 
 	/*
 	 * If an error occurred during capture, or if the buffer was cancelled,
@@ -1010,7 +1154,7 @@ void SimpleCameraData::imageBufferReady(FrameBuffer *buffer)
 			/* No conversion, just complete the request. */
 			Request *request = buffer->request();
 			pipe->completeBuffer(request, buffer);
-			SimpleFrameInfo *info = frameInfo_.find(request->sequence());
+			AtomispFrameInfo *info = frameInfo_.find(request->sequence());
 			if (info)
 				info->metadataRequired = false;
 			tryCompleteRequest(request);
@@ -1031,7 +1175,7 @@ void SimpleCameraData::imageBufferReady(FrameBuffer *buffer)
 		const RequestOutputs &outputs = conversionQueue_.front();
 		for (auto &[stream, buf] : outputs.outputs)
 			pipe->completeBuffer(outputs.request, buf);
-		SimpleFrameInfo *info = frameInfo_.find(outputs.request->sequence());
+		AtomispFrameInfo *info = frameInfo_.find(outputs.request->sequence());
 		if (info)
 			info->metadataRequired = false;
 		tryCompleteRequest(outputs.request);
@@ -1063,6 +1207,10 @@ void SimpleCameraData::imageBufferReady(FrameBuffer *buffer)
 	if (request)
 		request->_d()->metadata().set(controls::SensorTimestamp,
 					      buffer->metadata().timestamp);
+
+	/* Sample luminance for AtomISP AE on every successful capture buffer */
+	if (atomispAe_)
+		atomispAe_->processBuffer(buffer->metadata().sequence, buffer);
 
 	/*
 	 * Queue the captured and the request buffer to the converter or Software
@@ -1096,7 +1244,7 @@ void SimpleCameraData::imageBufferReady(FrameBuffer *buffer)
 	tryCompleteRequest(request);
 }
 
-void SimpleCameraData::clearIncompleteRequests()
+void AtomispCameraData::clearIncompleteRequests()
 {
 	while (!conversionQueue_.empty()) {
 		pipe()->cancelRequest(conversionQueue_.front().request);
@@ -1104,12 +1252,12 @@ void SimpleCameraData::clearIncompleteRequests()
 	}
 }
 
-void SimpleCameraData::tryCompleteRequest(Request *request)
+void AtomispCameraData::tryCompleteRequest(Request *request)
 {
 	if (request->hasPendingBuffers())
 		return;
 
-	SimpleFrameInfo *info = frameInfo_.find(request->sequence());
+	AtomispFrameInfo *info = frameInfo_.find(request->sequence());
 	if (!info) {
 		/* Something is really wrong, let's return. */
 		return;
@@ -1122,7 +1270,7 @@ void SimpleCameraData::tryCompleteRequest(Request *request)
 	pipe()->completeRequest(request);
 }
 
-void SimpleCameraData::conversionInputDone(FrameBuffer *buffer)
+void AtomispCameraData::conversionInputDone(FrameBuffer *buffer)
 {
 	if (rawStream_) {
 		/* Complete the input buffer as with raw-only processing. */
@@ -1135,9 +1283,9 @@ void SimpleCameraData::conversionInputDone(FrameBuffer *buffer)
 	}
 }
 
-void SimpleCameraData::conversionOutputDone(FrameBuffer *buffer)
+void AtomispCameraData::conversionOutputDone(FrameBuffer *buffer)
 {
-	SimplePipelineHandler *pipe = SimpleCameraData::pipe();
+	AtomispPipelineHandler *pipe = AtomispCameraData::pipe();
 
 	/* Complete the buffer and the request. */
 	Request *request = buffer->request();
@@ -1145,15 +1293,15 @@ void SimpleCameraData::conversionOutputDone(FrameBuffer *buffer)
 		tryCompleteRequest(request);
 }
 
-void SimpleCameraData::ispStatsReady(uint32_t frame, uint32_t bufferId)
+void AtomispCameraData::ispStatsReady(uint32_t frame, uint32_t bufferId)
 {
 	swIsp_->processStats(frame, bufferId,
 			     delayedCtrls_->get(frame));
 }
 
-void SimpleCameraData::metadataReady(uint32_t frame, const ControlList &metadata)
+void AtomispCameraData::metadataReady(uint32_t frame, const ControlList &metadata)
 {
-	SimpleFrameInfo *info = frameInfo_.find(frame);
+	AtomispFrameInfo *info = frameInfo_.find(frame);
 	if (!info)
 		return;
 
@@ -1162,7 +1310,7 @@ void SimpleCameraData::metadataReady(uint32_t frame, const ControlList &metadata
 	tryCompleteRequest(info->request);
 }
 
-void SimpleCameraData::setSensorControls(const ControlList &sensorControls)
+void AtomispCameraData::setSensorControls(const ControlList &sensorControls)
 {
 	delayedCtrls_->push(sensorControls);
 	/*
@@ -1180,7 +1328,7 @@ void SimpleCameraData::setSensorControls(const ControlList &sensorControls)
 }
 
 /* Retrieve all source pads connected to a sink pad through active routes. */
-std::vector<const MediaPad *> SimpleCameraData::routedSourcePads(MediaPad *sink)
+std::vector<const MediaPad *> AtomispCameraData::routedSourcePads(MediaPad *sink)
 {
 	MediaEntity *entity = sink->entity();
 	std::unique_ptr<V4L2Subdevice> subdev =
@@ -1204,7 +1352,7 @@ std::vector<const MediaPad *> SimpleCameraData::routedSourcePads(MediaPad *sink)
 
 		const MediaPad *pad = entity->getPadByIndex(route.source.pad);
 		if (!pad) {
-			LOG(SimplePipeline, Warning)
+			LOG(AtomispPipeline, Warning)
 				<< "Entity " << entity->name()
 				<< " has invalid route source pad "
 				<< route.source.pad;
@@ -1220,8 +1368,8 @@ std::vector<const MediaPad *> SimpleCameraData::routedSourcePads(MediaPad *sink)
  * Camera Configuration
  */
 
-SimpleCameraConfiguration::SimpleCameraConfiguration(Camera *camera,
-						     SimpleCameraData *data)
+AtomispCameraConfiguration::AtomispCameraConfiguration(Camera *camera,
+						     AtomispCameraData *data)
 	: CameraConfiguration(), camera_(camera->shared_from_this()),
 	  data_(data), pipeConfig_(nullptr)
 {
@@ -1254,7 +1402,7 @@ static Size adjustSize(const Size &requestedSize, const SizeRange &supportedSize
 
 } /* namespace */
 
-CameraConfiguration::Status SimpleCameraConfiguration::validate()
+CameraConfiguration::Status AtomispCameraConfiguration::validate()
 {
 	const CameraSensor *sensor = data_->sensor_.get();
 	Status status = Valid;
@@ -1294,9 +1442,9 @@ CameraConfiguration::Status SimpleCameraConfiguration::validate()
 			maxProcessedStreamSize.expandTo(cfg.size);
 	}
 
-	LOG(SimplePipeline, Debug)
+	LOG(AtomispPipeline, Debug)
 		<< "Largest processed stream size is " << maxProcessedStreamSize;
-	LOG(SimplePipeline, Debug)
+	LOG(AtomispPipeline, Debug)
 		<< "Largest raw stream size is " << maxRawStreamSize;
 
 	/* Cap the number of raw stream configurations */
@@ -1310,7 +1458,7 @@ CameraConfiguration::Status SimpleCameraConfiguration::validate()
 	}
 
 	if (rawCount > 1) {
-		LOG(SimplePipeline, Error)
+		LOG(AtomispPipeline, Error)
 			<< "Camera configuration with multiple raw streams not supported";
 		return Invalid;
 	}
@@ -1322,7 +1470,7 @@ CameraConfiguration::Status SimpleCameraConfiguration::validate()
 	 * priority). Default to the first pipeline configuration if no streams
 	 * request a supported pixel format.
 	 */
-	const std::vector<const SimpleCameraData::Configuration *> *configs =
+	const std::vector<const AtomispCameraData::Configuration *> *configs =
 		&data_->formats_.begin()->second;
 
 	auto rawIter = data_->formats_.find(requestedRawFormat);
@@ -1349,8 +1497,8 @@ CameraConfiguration::Status SimpleCameraConfiguration::validate()
 	 * the smallest sensor resolution that can accommodate all streams
 	 * without upscaling.
 	 */
-	const SimpleCameraData::Configuration *maxPipeConfig = nullptr;
-	const SimpleCameraData::Configuration *maxPipeConfigNonRaw = nullptr;
+	const AtomispCameraData::Configuration *maxPipeConfig = nullptr;
+	const AtomispCameraData::Configuration *maxPipeConfigNonRaw = nullptr;
 	pipeConfig_ = nullptr;
 	const bool requireNonRawCapture =
 		data_->pipe()->atomispQuirks() && maxRawStreamSize.isNull();
@@ -1363,7 +1511,7 @@ CameraConfiguration::Status SimpleCameraConfiguration::validate()
 		return -1;
 	};
 
-	for (const SimpleCameraData::Configuration *pipeConfig : *configs) {
+	for (const AtomispCameraData::Configuration *pipeConfig : *configs) {
 		const Size &captureSize = pipeConfig->captureSize;
 		const Size &maxOutputSize = pipeConfig->outputSizes.max;
 		const bool captureIsRaw =
@@ -1398,7 +1546,7 @@ CameraConfiguration::Status SimpleCameraConfiguration::validate()
 			pipeConfig_ = maxPipeConfig;
 	}
 
-	LOG(SimplePipeline, Debug)
+	LOG(AtomispPipeline, Debug)
 		<< "Picked "
 		<< V4L2SubdeviceFormat{ pipeConfig_->code, pipeConfig_->sensorSize, {} }
 		<< " -> " << pipeConfig_->captureSize
@@ -1432,7 +1580,7 @@ CameraConfiguration::Status SimpleCameraConfiguration::validate()
 				cfg.pixelFormat = pipeConfig_->captureFormat;
 				cfg.size = pipeConfig_->captureSize;
 
-				LOG(SimplePipeline, Debug)
+				LOG(AtomispPipeline, Debug)
 					<< "Adjusting raw stream to "
 					<< cfg.toString();
 				status = Adjusted;
@@ -1446,7 +1594,7 @@ CameraConfiguration::Status SimpleCameraConfiguration::validate()
 
 			PixelFormat pixelFormat = *it;
 			if (cfg.pixelFormat != pixelFormat) {
-				LOG(SimplePipeline, Debug)
+				LOG(AtomispPipeline, Debug)
 					<< "Adjusting processed pixel format from "
 					<< cfg.pixelFormat << " to " << pixelFormat;
 				cfg.pixelFormat = pixelFormat;
@@ -1480,12 +1628,12 @@ CameraConfiguration::Status SimpleCameraConfiguration::validate()
 			 * to Adjusted.
 			 */
 			cfg.colorSpace->adjust(cfg.pixelFormat);
-			LOG(SimplePipeline, Debug)
+			LOG(AtomispPipeline, Debug)
 				<< "Unspecified color space set to "
 				<< cfg.colorSpace.value().toString();
 		} else {
 			if (cfg.colorSpace->adjust(cfg.pixelFormat)) {
-				LOG(SimplePipeline, Debug)
+				LOG(AtomispPipeline, Debug)
 					<< "Color space adjusted to "
 					<< cfg.colorSpace.value().toString();
 				status = Adjusted;
@@ -1502,7 +1650,7 @@ CameraConfiguration::Status SimpleCameraConfiguration::validate()
 			 */
 			if (!pipeConfig_->outputSizes.contains(adjustedSize))
 				adjustedSize = adjustSize(cfg.size, pipeConfig_->outputSizes);
-			LOG(SimplePipeline, Debug)
+			LOG(AtomispPipeline, Debug)
 				<< "Adjusting size from " << cfg.size
 				<< " to " << adjustedSize;
 			cfg.size = adjustedSize;
@@ -1544,7 +1692,7 @@ CameraConfiguration::Status SimpleCameraConfiguration::validate()
 			cfg.bufferCount = kNumBuffersMax;
 
 		if (cfg.bufferCount != bufferCount) {
-			LOG(SimplePipeline, Debug)
+			LOG(AtomispPipeline, Debug)
 				<< "Adjusting bufferCount from " << bufferCount
 				<< " to " << cfg.bufferCount;
 			status = Adjusted;
@@ -1558,20 +1706,20 @@ CameraConfiguration::Status SimpleCameraConfiguration::validate()
  * Pipeline Handler
  */
 
-SimplePipelineHandler::SimplePipelineHandler(CameraManager *manager)
+AtomispPipelineHandler::AtomispPipelineHandler(CameraManager *manager)
 	: PipelineHandler(manager, kMaxQueuedRequestsDevice),
 	  converter_(nullptr),
 	  swIspEnabled_(false),
-	  atomispQuirks_(false)
+	  atomispQuirks_(true)
 {
 }
 
 std::unique_ptr<CameraConfiguration>
-SimplePipelineHandler::generateConfiguration(Camera *camera, Span<const StreamRole> roles)
+AtomispPipelineHandler::generateConfiguration(Camera *camera, Span<const StreamRole> roles)
 {
-	SimpleCameraData *data = cameraData(camera);
+	AtomispCameraData *data = cameraData(camera);
 	std::unique_ptr<CameraConfiguration> config =
-		std::make_unique<SimpleCameraConfiguration>(camera, data);
+		std::make_unique<AtomispCameraConfiguration>(camera, data);
 
 	if (roles.empty())
 		return config;
@@ -1581,7 +1729,7 @@ SimplePipelineHandler::generateConfiguration(Camera *camera, Span<const StreamRo
 	for (const auto &role : roles)
 		if (role == StreamRole::Raw) {
 			if (rawRequested) {
-				LOG(SimplePipeline, Error)
+				LOG(AtomispPipeline, Error)
 					<< "Can't capture multiple raw streams";
 				return nullptr;
 			}
@@ -1594,19 +1742,19 @@ SimplePipelineHandler::generateConfiguration(Camera *camera, Span<const StreamRo
 	std::map<PixelFormat, std::vector<SizeRange>> processedFormats;
 	std::map<PixelFormat, std::vector<SizeRange>> rawFormats;
 
-	for (const SimpleCameraData::Configuration &cfg : data->configs_) {
+	for (const AtomispCameraData::Configuration &cfg : data->configs_) {
 		rawFormats[cfg.captureFormat].push_back(cfg.captureSize);
 		for (PixelFormat format : cfg.outputFormats)
 			processedFormats[format].push_back(cfg.outputSizes);
 	}
 
 	if (processedRequested && processedFormats.empty()) {
-		LOG(SimplePipeline, Error)
+		LOG(AtomispPipeline, Error)
 			<< "Processed stream requested but no corresponding output configuration found";
 		return nullptr;
 	}
 	if (rawRequested && rawFormats.empty()) {
-		LOG(SimplePipeline, Error)
+		LOG(AtomispPipeline, Error)
 			<< "Raw stream requested but no corresponding output configuration found";
 		return nullptr;
 	}
@@ -1681,11 +1829,11 @@ SimplePipelineHandler::generateConfiguration(Camera *camera, Span<const StreamRo
 	return config;
 }
 
-int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
+int AtomispPipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 {
-	SimpleCameraConfiguration *config =
-		static_cast<SimpleCameraConfiguration *>(c);
-	SimpleCameraData *data = cameraData(camera);
+	AtomispCameraConfiguration *config =
+		static_cast<AtomispCameraConfiguration *>(c);
+	AtomispCameraData *data = cameraData(camera);
 	V4L2VideoDevice *video = data->video_;
 	int ret;
 
@@ -1697,7 +1845,7 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 	if (ret < 0)
 		return ret;
 
-	const SimpleCameraData::Configuration *pipeConfig = config->pipeConfig();
+	const AtomispCameraData::Configuration *pipeConfig = config->pipeConfig();
 	V4L2SubdeviceFormat format{};
 	format.code = pipeConfig->code;
 	format.size = pipeConfig->sensorSize;
@@ -1737,13 +1885,13 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 		return ret;
 
 	if (captureFormat.planesCount != 1) {
-		LOG(SimplePipeline, Error)
+		LOG(AtomispPipeline, Error)
 			<< "Planar formats using non-contiguous memory not supported";
 		return -EINVAL;
 	}
 
 	if (captureFormat.fourcc != videoFormat) {
-		LOG(SimplePipeline, Error)
+		LOG(AtomispPipeline, Error)
 			<< "Unable to configure capture in "
 			<< captureSize << "-" << videoFormat
 			<< " (got " << captureFormat << ")";
@@ -1756,13 +1904,13 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 			     static_cast<int>(captureSize.width)) <= 16 &&
 		    std::abs(static_cast<int>(captureFormat.size.height) -
 			     static_cast<int>(captureSize.height)) <= 16) {
-			LOG(SimplePipeline, Debug)
+			LOG(AtomispPipeline, Debug)
 				<< "Tolerating AtomISP capture size delta: requested "
 				<< captureSize << ", got " << captureFormat.size;
 			captureSize = captureFormat.size;
 			atomispSizeAdjusted = true;
 		} else {
-			LOG(SimplePipeline, Error)
+			LOG(AtomispPipeline, Error)
 				<< "Unable to configure capture in "
 				<< captureSize << "-" << videoFormat
 				<< " (got " << captureFormat << ")";
@@ -1786,7 +1934,7 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 		 * uses the correct dimensions, stride, and buffer size.
 		 */
 		if (atomispSizeAdjusted && !rawStream) {
-			LOG(SimplePipeline, Debug)
+			LOG(AtomispPipeline, Debug)
 				<< "Updating AtomISP stream config from " << cfg.size
 				<< " to " << captureSize;
 			cfg.size = captureSize;
@@ -1804,6 +1952,20 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 	if (outputCfgs.empty())
 		return 0;
 
+	/* Configure the AtomISP luminance AE loop when applicable */
+	if (atomispQuirks_) {
+		PixelFormat capturePf = captureFormat.fourcc.toPixelFormat();
+		data->atomispAe_ = std::make_unique<AtomispAeLoop>();
+		if (!data->atomispAe_->configure(data->sensor_.get(),
+						 capturePf, captureSize)) {
+			LOG(AtomispPipeline, Warning) << "AtomISP AE loop disabled";
+			data->atomispAe_.reset();
+		} else {
+			data->atomispAe_->setSensorControls.connect(
+				data, &AtomispCameraData::setSensorControls);
+		}
+	}
+
 	StreamConfiguration inputCfg;
 	inputCfg.pixelFormat = videoFormat.toPixelFormat();
 	inputCfg.size = captureSize;
@@ -1819,10 +1981,10 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 	}
 }
 
-int SimplePipelineHandler::exportFrameBuffers(Camera *camera, Stream *stream,
+int AtomispPipelineHandler::exportFrameBuffers(Camera *camera, Stream *stream,
 					      std::vector<std::unique_ptr<FrameBuffer>> *buffers)
 {
-	SimpleCameraData *data = cameraData(camera);
+	AtomispCameraData *data = cameraData(camera);
 	unsigned int count = stream->configuration().bufferCount;
 
 	/*
@@ -1837,16 +1999,16 @@ int SimplePipelineHandler::exportFrameBuffers(Camera *camera, Stream *stream,
 		return data->video_->exportBuffers(count, buffers);
 }
 
-int SimplePipelineHandler::start(Camera *camera, [[maybe_unused]] const ControlList *controls)
+int AtomispPipelineHandler::start(Camera *camera, [[maybe_unused]] const ControlList *controls)
 {
-	SimpleCameraData *data = cameraData(camera);
+	AtomispCameraData *data = cameraData(camera);
 	V4L2VideoDevice *video = data->video_;
 	V4L2Subdevice *frameStartEmitter = data->frameStartEmitter_;
 	int ret;
 
 	const MediaPad *pad = acquirePipeline(data);
 	if (pad) {
-		LOG(SimplePipeline, Info)
+		LOG(AtomispPipeline, Info)
 			<< "Failed to acquire pipeline, entity "
 			<< pad->entity()->name() << " in use";
 		return -EBUSY;
@@ -1872,7 +2034,7 @@ int SimplePipelineHandler::start(Camera *camera, [[maybe_unused]] const ControlL
 		return ret;
 	}
 
-	video->bufferReady.connect(data, &SimpleCameraData::imageBufferReady);
+	video->bufferReady.connect(data, &AtomispCameraData::imageBufferReady);
 
 	data->delayedCtrls_->reset();
 	if (frameStartEmitter) {
@@ -1884,7 +2046,7 @@ int SimplePipelineHandler::start(Camera *camera, [[maybe_unused]] const ControlL
 				 * the entity advertising support. Continue without frame-start
 				 * driven delayed controls so streaming can still operate.
 				 */
-				LOG(SimplePipeline, Warning)
+				LOG(AtomispPipeline, Warning)
 					<< "Frame start events unavailable on "
 					<< frameStartEmitter->entity()->name() << ": "
 					<< strerror(-ret) << " (" << ret << "), continuing without them";
@@ -1927,9 +2089,9 @@ int SimplePipelineHandler::start(Camera *camera, [[maybe_unused]] const ControlL
 	return 0;
 }
 
-void SimplePipelineHandler::stopDevice(Camera *camera)
+void AtomispPipelineHandler::stopDevice(Camera *camera)
 {
-	SimpleCameraData *data = cameraData(camera);
+	AtomispCameraData *data = cameraData(camera);
 	V4L2VideoDevice *video = data->video_;
 	V4L2Subdevice *frameStartEmitter = data->frameStartEmitter_;
 
@@ -1949,7 +2111,7 @@ void SimplePipelineHandler::stopDevice(Camera *camera)
 	video->streamOff();
 	video->releaseBuffers();
 
-	video->bufferReady.disconnect(data, &SimpleCameraData::imageBufferReady);
+	video->bufferReady.disconnect(data, &AtomispCameraData::imageBufferReady);
 
 	data->frameInfo_.clear();
 	data->clearIncompleteRequests();
@@ -1958,9 +2120,9 @@ void SimplePipelineHandler::stopDevice(Camera *camera)
 	releasePipeline(data);
 }
 
-int SimplePipelineHandler::queueRequestDevice(Camera *camera, Request *request)
+int AtomispPipelineHandler::queueRequestDevice(Camera *camera, Request *request)
 {
-	SimpleCameraData *data = cameraData(camera);
+	AtomispCameraData *data = cameraData(camera);
 	int ret;
 
 	std::map<const Stream *, FrameBuffer *> buffers;
@@ -1997,7 +2159,7 @@ int SimplePipelineHandler::queueRequestDevice(Camera *camera, Request *request)
  */
 
 std::vector<MediaEntity *>
-SimplePipelineHandler::locateSensors(MediaDevice *media)
+AtomispPipelineHandler::locateSensors(MediaDevice *media)
 {
 	std::vector<MediaEntity *> entities;
 
@@ -2067,7 +2229,7 @@ SimplePipelineHandler::locateSensors(MediaDevice *media)
 	return sensors;
 }
 
-int SimplePipelineHandler::resetRoutingTable(V4L2Subdevice *subdev)
+int AtomispPipelineHandler::resetRoutingTable(V4L2Subdevice *subdev)
 {
 	/* Reset the media entity routing table to its default state. */
 	V4L2Subdevice::Routing routing = {};
@@ -2085,21 +2247,21 @@ int SimplePipelineHandler::resetRoutingTable(V4L2Subdevice *subdev)
 	 * the subdev.
 	 */
 	if (routing.empty()) {
-		LOG(SimplePipeline, Error)
+		LOG(AtomispPipeline, Error)
 			<< "Default routing table of " << subdev->deviceNode()
 			<< " is empty";
 		return -EINVAL;
 	}
 
-	LOG(SimplePipeline, Debug)
+	LOG(AtomispPipeline, Debug)
 		<< "Routing table of " << subdev->deviceNode()
 		<< " reset to " << routing;
 
 	return 0;
 }
 
-bool SimplePipelineHandler::matchDevice(std::shared_ptr<MediaDevice> media,
-					const SimplePipelineInfo &info,
+bool AtomispPipelineHandler::matchDevice(std::shared_ptr<MediaDevice> media,
+					const AtomispDriverInfo &info,
 					DeviceEnumerator *enumerator)
 {
 	unsigned int numStreams = 1;
@@ -2123,17 +2285,16 @@ bool SimplePipelineHandler::matchDevice(std::shared_ptr<MediaDevice> media,
 		numStreams = 2;
 	}
 
-	swIspEnabled_ = info.swIspEnabled;
-	atomispQuirks_ = !strcmp(info.driver, "atomisp") ||
-			 !strcmp(info.driver, "atomisp-isp2");
+	swIspEnabled_ = false; /* AtomISP always outputs YUV; no software debayering */
+	atomispQuirks_ = true;
 	const GlobalConfiguration &configuration = cameraManager()->_d()->configuration();
 	for (const ValueNode &entry :
-	     configuration.configuration()["pipelines"]["simple"]["supported_devices"]
+	     configuration.configuration()["pipelines"]["atomisp"]["supported_devices"]
 		     .asList()) {
 		auto name = entry["driver"].get<std::string>();
 		if (name == info.driver) {
 			swIspEnabled_ = entry["software_isp"].get<bool>().value_or(swIspEnabled_);
-			LOG(SimplePipeline, Debug)
+			LOG(AtomispPipeline, Debug)
 				<< "Configuration file overrides software ISP for "
 				<< info.driver << " to " << swIspEnabled_;
 			break;
@@ -2143,32 +2304,32 @@ bool SimplePipelineHandler::matchDevice(std::shared_ptr<MediaDevice> media,
 	/* Locate the sensors. */
 	std::vector<MediaEntity *> sensors = locateSensors(media.get());
 	if (sensors.empty()) {
-		LOG(SimplePipeline, Info) << "No sensor found for " << media->deviceNode();
+		LOG(AtomispPipeline, Info) << "No sensor found for " << media->deviceNode();
 		return false;
 	}
 
-	LOG(SimplePipeline, Debug) << "Sensor found for " << media->deviceNode();
+	LOG(AtomispPipeline, Debug) << "Sensor found for " << media->deviceNode();
 
 	/*
 	 * Create one camera data instance for each sensor and gather all
 	 * entities in all pipelines.
 	 */
-	std::vector<std::unique_ptr<SimpleCameraData>> pipelines;
+	std::vector<std::unique_ptr<AtomispCameraData>> pipelines;
 	std::set<MediaEntity *> entities;
 
 	pipelines.reserve(sensors.size());
 
 	for (MediaEntity *sensor : sensors) {
-		std::unique_ptr<SimpleCameraData> data =
-			std::make_unique<SimpleCameraData>(this, numStreams, sensor);
+		std::unique_ptr<AtomispCameraData> data =
+			std::make_unique<AtomispCameraData>(this, numStreams, sensor);
 		if (!data->isValid()) {
-			LOG(SimplePipeline, Error)
+			LOG(AtomispPipeline, Error)
 				<< "No valid pipeline for sensor '"
 				<< sensor->name() << "', skipping";
 			continue;
 		}
 
-		for (SimpleCameraData::Entity &entity : data->entities_)
+		for (AtomispCameraData::Entity &entity : data->entities_)
 			entities.insert(entity.entity);
 
 		pipelines.push_back(std::move(data));
@@ -2192,7 +2353,7 @@ bool SimplePipelineHandler::matchDevice(std::shared_ptr<MediaDevice> media,
 			video = std::make_unique<V4L2VideoDevice>(entity);
 			ret = video->open();
 			if (ret < 0) {
-				LOG(SimplePipeline, Error)
+				LOG(AtomispPipeline, Error)
 					<< "Failed to open " << video->deviceNode()
 					<< ": " << strerror(-ret);
 				return false;
@@ -2203,7 +2364,7 @@ bool SimplePipelineHandler::matchDevice(std::shared_ptr<MediaDevice> media,
 			subdev = std::make_unique<V4L2Subdevice>(entity);
 			ret = subdev->open();
 			if (ret < 0) {
-				LOG(SimplePipeline, Error)
+				LOG(AtomispPipeline, Error)
 					<< "Failed to open " << subdev->deviceNode()
 					<< ": " << strerror(-ret);
 				return false;
@@ -2217,7 +2378,7 @@ bool SimplePipelineHandler::matchDevice(std::shared_ptr<MediaDevice> media,
 				 */
 				ret = resetRoutingTable(subdev.get());
 				if (ret) {
-					LOG(SimplePipeline, Error)
+					LOG(AtomispPipeline, Error)
 						<< "Failed to reset routes for "
 						<< subdev->deviceNode() << ": "
 						<< strerror(-ret);
@@ -2237,7 +2398,7 @@ bool SimplePipelineHandler::matchDevice(std::shared_ptr<MediaDevice> media,
 	/* Initialize each pipeline and register a corresponding camera. */
 	bool registered = false;
 
-	for (std::unique_ptr<SimpleCameraData> &data : pipelines) {
+	for (std::unique_ptr<AtomispCameraData> &data : pipelines) {
 		int ret = data->init();
 		if (ret < 0)
 			continue;
@@ -2257,11 +2418,11 @@ bool SimplePipelineHandler::matchDevice(std::shared_ptr<MediaDevice> media,
 	return registered;
 }
 
-bool SimplePipelineHandler::match(DeviceEnumerator *enumerator)
+bool AtomispPipelineHandler::match(DeviceEnumerator *enumerator)
 {
 	std::shared_ptr<MediaDevice> media;
 
-	for (const SimplePipelineInfo &inf : supportedDevices) {
+	for (const AtomispDriverInfo &inf : supportedDevices) {
 		DeviceMatch dm(inf.driver);
 		while ((media = acquireMediaDevice(enumerator, dm))) {
 			/*
@@ -2271,7 +2432,7 @@ bool SimplePipelineHandler::match(DeviceEnumerator *enumerator)
 			 * successfully match one (or run out).
 			 */
 			if (matchDevice(media, inf, enumerator)) {
-				LOG(SimplePipeline, Debug)
+				LOG(AtomispPipeline, Debug)
 					<< "Matched on device: "
 					<< media->deviceNode();
 				return true;
@@ -2294,7 +2455,7 @@ bool SimplePipelineHandler::match(DeviceEnumerator *enumerator)
 	return false;
 }
 
-V4L2VideoDevice *SimplePipelineHandler::video(const MediaEntity *entity)
+V4L2VideoDevice *AtomispPipelineHandler::video(const MediaEntity *entity)
 {
 	auto iter = entities_.find(entity);
 	if (iter == entities_.end())
@@ -2303,7 +2464,7 @@ V4L2VideoDevice *SimplePipelineHandler::video(const MediaEntity *entity)
 	return iter->second.video.get();
 }
 
-V4L2Subdevice *SimplePipelineHandler::subdev(const MediaEntity *entity)
+V4L2Subdevice *AtomispPipelineHandler::subdev(const MediaEntity *entity)
 {
 	auto iter = entities_.find(entity);
 	if (iter == entities_.end())
@@ -2316,9 +2477,9 @@ V4L2Subdevice *SimplePipelineHandler::subdev(const MediaEntity *entity)
  * \brief Acquire all resources needed by the camera pipeline
  * \return nullptr on success, a pointer to the contended pad on error
  */
-const MediaPad *SimplePipelineHandler::acquirePipeline(SimpleCameraData *data)
+const MediaPad *AtomispPipelineHandler::acquirePipeline(AtomispCameraData *data)
 {
-	for (const SimpleCameraData::Entity &entity : data->entities_) {
+	for (const AtomispCameraData::Entity &entity : data->entities_) {
 		const EntityData &edata = entities_[entity.entity];
 
 		if (entity.sink) {
@@ -2334,7 +2495,7 @@ const MediaPad *SimplePipelineHandler::acquirePipeline(SimpleCameraData *data)
 		}
 	}
 
-	for (const SimpleCameraData::Entity &entity : data->entities_) {
+	for (const AtomispCameraData::Entity &entity : data->entities_) {
 		EntityData &edata = entities_[entity.entity];
 
 		if (entity.sink)
@@ -2346,9 +2507,9 @@ const MediaPad *SimplePipelineHandler::acquirePipeline(SimpleCameraData *data)
 	return nullptr;
 }
 
-void SimplePipelineHandler::releasePipeline(SimpleCameraData *data)
+void AtomispPipelineHandler::releasePipeline(AtomispCameraData *data)
 {
-	for (const SimpleCameraData::Entity &entity : data->entities_) {
+	for (const AtomispCameraData::Entity &entity : data->entities_) {
 		EntityData &edata = entities_[entity.entity];
 
 		if (entity.sink) {
@@ -2365,6 +2526,6 @@ void SimplePipelineHandler::releasePipeline(SimpleCameraData *data)
 	}
 }
 
-REGISTER_PIPELINE_HANDLER(SimplePipelineHandler, "simple")
+REGISTER_PIPELINE_HANDLER(AtomispPipelineHandler, "atomisp")
 
 } /* namespace libcamera */
