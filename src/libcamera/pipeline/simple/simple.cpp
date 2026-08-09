@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <iterator>
 #include <list>
 #include <map>
@@ -46,6 +47,7 @@
 #include "libcamera/internal/media_device.h"
 #include "libcamera/internal/pipeline_handler.h"
 #include "libcamera/internal/request.h"
+#include "libcamera/internal/mapped_buffer.h"
 #include "libcamera/internal/software_isp/software_isp.h"
 #include "libcamera/internal/v4l2_subdevice.h"
 #include "libcamera/internal/v4l2_videodevice.h"
@@ -279,6 +281,154 @@ bool isRaw(const StreamConfiguration &cfg)
 
 } /* namespace */
 
+/*
+ * Luminance-based AE loop for the AtomISP path. AtomISP outputs YUV, so
+ * the debayer software-ISP path is not applicable. Instead, sample the Y
+ * channel of each UYVY capture buffer and apply the same proportional
+ * controller used by the soft-IPA AGC to adjust sensor exposure and gain.
+ */
+class AtomispAeLoop
+{
+public:
+	Signal<ControlList> setSensorControls;
+
+	bool configure(const CameraSensor *sensor,
+		       const PixelFormat &format, const Size &size);
+	void processBuffer(uint32_t sequence, FrameBuffer *buffer);
+
+private:
+	void updateExposure(double msv);
+
+	const CameraSensor *sensor_ = nullptr;
+	PixelFormat format_;
+	Size size_;
+
+	int32_t exposure_ = 0, exposureMin_ = 0, exposureMax_ = 0;
+	double gain_ = 1.0, gainMin_ = 1.0, gainMax_ = 1.0;
+
+	/* Process every kInterval frames to keep CPU load low */
+	static constexpr unsigned int kInterval = 3;
+	/* Match the soft-IPA AGC controller constants */
+	static constexpr double kOptimalMsv = 2.5;
+	static constexpr double kSatisfactory = 0.2;
+	static constexpr double kPGain = 0.04;
+	static constexpr double kMaxStep = 0.15;
+};
+
+bool AtomispAeLoop::configure(const CameraSensor *sensor,
+			      const PixelFormat &format, const Size &size)
+{
+	sensor_ = sensor;
+	format_ = format;
+	size_ = size;
+
+	const ControlInfoMap &ctrls = sensor->controls();
+
+	auto itExp = ctrls.find(V4L2_CID_EXPOSURE);
+	if (itExp == ctrls.end()) {
+		LOG(SimplePipeline, Warning) << "AtomISP AE: no exposure control";
+		return false;
+	}
+	exposureMin_ = itExp->second.min().get<int32_t>();
+	exposureMax_ = itExp->second.max().get<int32_t>();
+	exposure_ = itExp->second.def().get<int32_t>();
+
+	auto itGain = ctrls.find(V4L2_CID_ANALOGUE_GAIN);
+	if (itGain == ctrls.end()) {
+		LOG(SimplePipeline, Warning) << "AtomISP AE: no gain control";
+		return false;
+	}
+	gainMin_ = itGain->second.min().get<int32_t>();
+	gainMax_ = itGain->second.max().get<int32_t>();
+	gain_ = itGain->second.def().get<int32_t>();
+
+	LOG(SimplePipeline, Debug)
+		<< "AtomISP AE configured: exp [" << exposureMin_ << ".."
+		<< exposureMax_ << "] def=" << exposure_
+		<< " gain [" << gainMin_ << ".." << gainMax_ << "] def=" << gain_;
+
+	return true;
+}
+
+void AtomispAeLoop::processBuffer(uint32_t sequence, FrameBuffer *buffer)
+{
+	if (sequence % kInterval != 0)
+		return;
+
+	/* Only UYVY is handled: Y bytes at odd byte positions within each row */
+	if (format_ != formats::UYVY)
+		return;
+
+	MappedFrameBuffer in(buffer, MappedFrameBuffer::MapFlag::Read);
+	if (!in.isValid()) {
+		LOG(SimplePipeline, Warning) << "AtomISP AE: mmap failed";
+		return;
+	}
+
+	const uint8_t *data = in.planes()[0].begin();
+	/* UYVY: 2 bytes per pixel, so stride = width * 2 */
+	const unsigned int stride = size_.width * 2;
+
+	/*
+	 * Sample Y over a regular grid: every 8th row, every 64th pixel.
+	 * In UYVY the byte layout per two pixels is [U0 Y0 V0 Y1], so Y bytes
+	 * are at odd positions: 1, 3, 5 ... Step 128 bytes = 64 pixels.
+	 */
+	uint64_t ySum = 0;
+	unsigned int count = 0;
+	for (unsigned int row = 0; row < size_.height; row += 8) {
+		const uint8_t *line = data + row * stride;
+		for (unsigned int col = 1; col < stride; col += 128) {
+			ySum += line[col];
+			count++;
+		}
+	}
+
+	if (!count)
+		return;
+
+	/* Scale mean Y (0-255) to MSV range (0-5) matching the soft-IPA AGC */
+	double msv = static_cast<double>(ySum) / count * 5.0 / 255.0;
+	updateExposure(msv);
+}
+
+void AtomispAeLoop::updateExposure(double msv)
+{
+	double error = kOptimalMsv - msv;
+
+	if (std::abs(error) <= kSatisfactory)
+		return;
+
+	double step = std::clamp(error * kPGain, -kMaxStep, kMaxStep);
+	double factor = 1.0 + step;
+
+	if (factor > 1.0) {
+		/* Too dark: raise exposure first, then gain */
+		if (exposure_ < exposureMax_) {
+			int32_t next = static_cast<int32_t>(exposure_ * factor);
+			exposure_ = std::max(next, exposure_ + 1);
+		} else {
+			gain_ = std::min(gain_ * factor, gainMax_);
+		}
+	} else {
+		/* Too bright: lower gain first, then exposure */
+		if (gain_ > gainMin_) {
+			gain_ = std::max(gain_ * factor, gainMin_);
+		} else {
+			int32_t next = static_cast<int32_t>(exposure_ * factor);
+			exposure_ = std::min(next, exposure_ - 1);
+		}
+	}
+
+	exposure_ = std::clamp(exposure_, exposureMin_, exposureMax_);
+	gain_ = std::clamp(gain_, gainMin_, gainMax_);
+
+	ControlList sensorCtrls(sensor_->controls());
+	sensorCtrls.set(V4L2_CID_EXPOSURE, exposure_);
+	sensorCtrls.set(V4L2_CID_ANALOGUE_GAIN, static_cast<int32_t>(gain_));
+	setSensorControls.emit(sensorCtrls);
+}
+
 class SimpleCameraData : public Camera::Private
 {
 public:
@@ -363,6 +513,7 @@ public:
 
 	std::unique_ptr<Converter> converter_;
 	std::unique_ptr<SoftwareIsp> swIsp_;
+	std::unique_ptr<AtomispAeLoop> atomispAe_;
 	SimpleFrames frameInfo_;
 
 private:
@@ -1064,6 +1215,10 @@ void SimpleCameraData::imageBufferReady(FrameBuffer *buffer)
 	if (request)
 		request->_d()->metadata().set(controls::SensorTimestamp,
 					      buffer->metadata().timestamp);
+
+	/* Sample luminance for AtomISP AE on every successful capture buffer */
+	if (atomispAe_)
+		atomispAe_->processBuffer(buffer->metadata().sequence, buffer);
 
 	/*
 	 * Queue the captured and the request buffer to the converter or Software
@@ -1804,6 +1959,20 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 
 	if (outputCfgs.empty())
 		return 0;
+
+	/* Configure the AtomISP luminance AE loop when applicable */
+	if (atomispQuirks_) {
+		PixelFormat capturePf = captureFormat.fourcc.toPixelFormat();
+		data->atomispAe_ = std::make_unique<AtomispAeLoop>();
+		if (!data->atomispAe_->configure(data->sensor_.get(),
+						 capturePf, captureSize)) {
+			LOG(SimplePipeline, Warning) << "AtomISP AE loop disabled";
+			data->atomispAe_.reset();
+		} else {
+			data->atomispAe_->setSensorControls.connect(
+				data, &SimpleCameraData::setSensorControls);
+		}
+	}
 
 	StreamConfiguration inputCfg;
 	inputCfg.pixelFormat = videoFormat.toPixelFormat();
