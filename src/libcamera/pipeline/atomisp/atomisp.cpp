@@ -1508,11 +1508,15 @@ CameraConfiguration::Status AtomispCameraConfiguration::validate()
 	const bool requireNonRawCapture =
 		data_->pipe()->atomispQuirks() && maxRawStreamSize.isNull();
 	auto atomispCaptureFormatScore = [](PixelFormat format) {
-		if (format == PixelFormat{ V4L2_PIX_FMT_UYVY })
-			return 0;
-		if (format == PixelFormat{ V4L2_PIX_FMT_YUYV })
-			return 1;
-
+		/* Prefer packed interleaved YUV; accept any non-raw YUV format */
+		if (format == PixelFormat{ V4L2_PIX_FMT_UYVY }) return 0;
+		if (format == PixelFormat{ V4L2_PIX_FMT_YUYV }) return 1;
+		if (format == PixelFormat{ V4L2_PIX_FMT_NV12 }) return 2;
+		if (format == PixelFormat{ V4L2_PIX_FMT_NV21 }) return 3;
+		if (format == PixelFormat{ V4L2_PIX_FMT_YUV420 }) return 4;
+		if (format == PixelFormat{ V4L2_PIX_FMT_YVU420 }) return 5;
+		if (format == PixelFormat{ V4L2_PIX_FMT_NV16 }) return 6;
+		if (!BayerFormat::fromPixelFormat(format).isValid()) return 7;
 		return -1;
 	};
 
