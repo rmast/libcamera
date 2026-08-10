@@ -1954,15 +1954,18 @@ int AtomispPipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 
 		cfg.setStream(&data->streams_[i]);
 
-		/* AtomISP: ISP crops top/left border, so actual output is smaller
-		 * than the sensor size. Update the stream config so the application
-		 * uses the correct dimensions, stride, and buffer size.
+		/* AtomISP: always update stride and frame size from the actual
+		 * hardware format — the ISP may add alignment padding (e.g.
+		 * bpl=2624 for a 1296-wide UYVY frame) even without a size
+		 * adjustment, and the SPA plugin must see the real values.
 		 */
-		if (atomispSizeAdjusted && !rawStream) {
-			LOG(AtomispPipeline, Debug)
-				<< "Updating AtomISP stream config from " << cfg.size
-				<< " to " << captureSize;
-			cfg.size = captureSize;
+		if (!rawStream) {
+			if (atomispSizeAdjusted) {
+				LOG(AtomispPipeline, Debug)
+					<< "Updating AtomISP stream config from " << cfg.size
+					<< " to " << captureSize;
+				cfg.size = captureSize;
+			}
 			cfg.stride = captureFormat.planes[0].bpl;
 			cfg.frameSize = captureFormat.planes[0].size;
 		}
