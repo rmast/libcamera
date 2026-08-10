@@ -1413,13 +1413,18 @@ CameraConfiguration::Status AtomispCameraConfiguration::validate()
 	Orientation requestedOrientation = orientation;
 	if (data_->pipe()->atomispQuirks()) {
 		/*
-		 * On AtomISP + mt9m114 the orientation metadata is incomplete and
-		 * automatic transform computation can rotate the pipeline into an
-		 * unintended portrait path (for example 400x592). Keep identity
-		 * transform for stable preview geometry.
+		 * Use the sensor's native transform so firmware-programmed flips
+		 * (e.g. 180° mounted sensors) are honoured. Guard against
+		 * axis-transposing transforms (90°/270°) that would swap the
+		 * landscape sensor into a portrait capture path.
 		 */
-		combinedTransform_ = Transform::Identity;
-		orientation = requestedOrientation;
+		combinedTransform_ = sensor->computeTransform(&orientation);
+		if (!!(combinedTransform_ & Transform::Transpose)) {
+			combinedTransform_ = Transform::Identity;
+			orientation = requestedOrientation;
+		} else if (orientation != requestedOrientation) {
+			status = Adjusted;
+		}
 	} else {
 		combinedTransform_ = sensor->computeTransform(&orientation);
 		if (orientation != requestedOrientation)
