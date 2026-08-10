@@ -209,12 +209,25 @@ int CameraSensorLegacy::init()
 	/*
 	 * Clear any flips to be sure we get the "native" Bayer order. This is
 	 * harmless for sensors where the flips don't affect the Bayer order.
+	 * Save the firmware-programmed values first and restore them afterwards
+	 * so that the kernel-cached values are not permanently zeroed out (which
+	 * would cause the V4L2 direct path to stream with the wrong orientation).
 	 */
+	ControlList flipCtrls(subdev_->controls());
+	bool hasHFlip = subdev_->controls().find(V4L2_CID_HFLIP) != subdev_->controls().end();
+	bool hasVFlip = subdev_->controls().find(V4L2_CID_VFLIP) != subdev_->controls().end();
+	int32_t savedHFlip = 0, savedVFlip = 0;
+	if (hasHFlip || hasVFlip) {
+		std::vector<uint32_t> ids;
+		if (hasHFlip) ids.push_back(V4L2_CID_HFLIP);
+		if (hasVFlip) ids.push_back(V4L2_CID_VFLIP);
+		ControlList readCtrls = subdev_->getControls(ids);
+		if (hasHFlip) savedHFlip = readCtrls.get(V4L2_CID_HFLIP).get<int32_t>();
+		if (hasVFlip) savedVFlip = readCtrls.get(V4L2_CID_VFLIP).get<int32_t>();
+	}
 	ControlList ctrls(subdev_->controls());
-	if (subdev_->controls().find(V4L2_CID_HFLIP) != subdev_->controls().end())
-		ctrls.set(V4L2_CID_HFLIP, 0);
-	if (subdev_->controls().find(V4L2_CID_VFLIP) != subdev_->controls().end())
-		ctrls.set(V4L2_CID_VFLIP, 0);
+	if (hasHFlip) ctrls.set(V4L2_CID_HFLIP, 0);
+	if (hasVFlip) ctrls.set(V4L2_CID_VFLIP, 0);
 	subdev_->setControls(&ctrls);
 
 	/* Enumerate, sort and cache media bus codes and sizes. */
@@ -222,6 +235,14 @@ int CameraSensorLegacy::init()
 	if (formats_.empty()) {
 		LOG(CameraSensor, Error) << "No image format found";
 		return -EINVAL;
+	}
+
+	/* Restore firmware-programmed flip values */
+	if (savedHFlip || savedVFlip) {
+		ControlList restoreCtrls(subdev_->controls());
+		if (hasHFlip) restoreCtrls.set(V4L2_CID_HFLIP, savedHFlip);
+		if (hasVFlip) restoreCtrls.set(V4L2_CID_VFLIP, savedVFlip);
+		subdev_->setControls(&restoreCtrls);
 	}
 
 	mbusCodes_ = utils::map_keys(formats_);
