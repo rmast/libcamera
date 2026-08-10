@@ -899,6 +899,7 @@ void AtomispCameraData::tryPipeline(unsigned int code, const Size &size)
 		};
 
 		for (const Size &captureSize : captureSizes) {
+			Size actualCaptureSize = captureSize;
 				/* AtomISP: captureSize here is the sensor output size.
 				 * Binning mode (~648x488) must be skipped due to DVS
 				 * padding mismatch; only full-res (~1296x976) is usable.
@@ -931,20 +932,27 @@ void AtomispCameraData::tryPipeline(unsigned int code, const Size &size)
 							<< " (video node reports " << captureFormat << ")";
 						continue;
 					}
+
+					/*
+					 * Record the actual ISP output size (may include border
+					 * padding) so validate() and the SPA plugin advertise the
+					 * real buffer dimensions and avoid a stride mismatch.
+					 */
+					actualCaptureSize = captureFormat.size;
 				}
 
 			Configuration config;
 			config.code = code;
 			config.sensorSize = size;
 			config.captureFormat = pixelFormat;
-			config.captureSize = captureSize;
+			config.captureSize = actualCaptureSize;
 
 			if (converter_) {
 				config.outputFormats = converter_->formats(pixelFormat);
-				config.outputSizes = converter_->sizes(captureSize);
+				config.outputSizes = converter_->sizes(actualCaptureSize);
 			} else if (swIsp_) {
 				config.outputFormats = swIsp_->formats(pixelFormat);
-				config.outputSizes = swIsp_->sizes(pixelFormat, captureSize);
+				config.outputSizes = swIsp_->sizes(pixelFormat, actualCaptureSize);
 				if (config.outputFormats.empty()) {
 					/* Do not use swIsp for unsupported pixelFormat's. */
 					config.outputFormats = { pixelFormat };
