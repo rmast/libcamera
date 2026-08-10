@@ -1846,6 +1846,19 @@ AtomispPipelineHandler::generateConfiguration(Camera *camera, Span<const StreamR
 		cfg.pixelFormat = pickDefaultFormat(formats, role != StreamRole::Raw);
 		cfg.size = formats.begin()->second[0].max;
 
+		/*
+		 * Pre-compute stride with AtomISP's 64-byte row alignment so the
+		 * PipeWire SPA plugin uses the correct value during format
+		 * negotiation (before configure() can update it).
+		 */
+		if (atomispQuirks_ && role != StreamRole::Raw) {
+			const PixelFormatInfo &info = PixelFormatInfo::info(cfg.pixelFormat);
+			if (info.isValid()) {
+				cfg.stride = ((info.stride(cfg.size.width, 0, 1) + 63) / 64) * 64;
+				cfg.frameSize = cfg.stride * cfg.size.height;
+			}
+		}
+
 		config->addConfiguration(cfg);
 	}
 
