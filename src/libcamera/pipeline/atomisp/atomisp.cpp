@@ -1551,6 +1551,11 @@ CameraConfiguration::Status AtomispCameraConfiguration::validate()
 			pipeConfig_ = maxPipeConfig;
 	}
 
+	if (!pipeConfig_) {
+		LOG(AtomispPipeline, Error) << "No valid pipeline configuration found";
+		return Invalid;
+	}
+
 	LOG(AtomispPipeline, Debug)
 		<< "Picked "
 		<< V4L2SubdeviceFormat{ pipeConfig_->code, pipeConfig_->sensorSize, {} }
@@ -1591,6 +1596,9 @@ CameraConfiguration::Status AtomispCameraConfiguration::validate()
 				status = Adjusted;
 			}
 		} else {
+			if (pipeConfig_->outputFormats.empty())
+				return Invalid;
+
 			auto it = std::find(pipeConfig_->outputFormats.begin(),
 					    pipeConfig_->outputFormats.end(),
 					    cfg.pixelFormat);
