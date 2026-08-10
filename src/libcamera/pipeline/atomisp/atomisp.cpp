@@ -285,6 +285,7 @@ public:
 
 	bool configure(const CameraSensor *sensor,
 		       const PixelFormat &format, const Size &size);
+	void bootstrap();
 	void processBuffer(uint32_t sequence, FrameBuffer *buffer);
 
 private:
@@ -339,6 +340,15 @@ bool AtomispAeLoop::configure(const CameraSensor *sensor,
 		<< " gain [" << gainMin_ << ".." << gainMax_ << "] def=" << gain_;
 
 	return true;
+}
+
+void AtomispAeLoop::bootstrap()
+{
+	/* Emit initial controls so hardware starts at a usable exposure. */
+	ControlList sensorCtrls(sensor_->controls());
+	sensorCtrls.set(V4L2_CID_EXPOSURE, exposure_);
+	sensorCtrls.set(V4L2_CID_ANALOGUE_GAIN, static_cast<int32_t>(gain_));
+	setSensorControls.emit(sensorCtrls);
 }
 
 void AtomispAeLoop::processBuffer(uint32_t sequence, FrameBuffer *buffer)
@@ -2004,6 +2014,8 @@ int AtomispPipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 		} else {
 			data->atomispAe_->setSensorControls.connect(
 				data, &AtomispCameraData::setSensorControls);
+			/* Write initial exposure/gain so hardware starts bright. */
+			data->atomispAe_->bootstrap();
 		}
 	}
 
