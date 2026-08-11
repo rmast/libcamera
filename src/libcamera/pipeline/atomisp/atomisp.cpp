@@ -402,8 +402,15 @@ void AtomispAeLoop::processBuffer(uint32_t sequence, FrameBuffer *buffer)
 	if (sequence % kInterval != 0)
 		return;
 
-	/* Only UYVY is handled: Y bytes at odd byte positions within each row */
-	if (format_ != formats::UYVY)
+	const bool isUyvy = format_ == formats::UYVY;
+	const bool isYuyv = format_ == formats::YUYV;
+	const bool isLumaPlane0 =
+		format_ == formats::NV12 || format_ == formats::NV21 ||
+		format_ == formats::YUV420 || format_ == formats::YVU420 ||
+		format_ == formats::NV16 || format_ == formats::YUV422 ||
+		format_ == formats::YUV444;
+
+	if (!isUyvy && !isYuyv && !isLumaPlane0)
 		return;
 
 	MappedFrameBuffer in(buffer, MappedFrameBuffer::MapFlag::Read);
@@ -418,16 +425,25 @@ void AtomispAeLoop::processBuffer(uint32_t sequence, FrameBuffer *buffer)
 
 	/*
 	 * Sample Y over a regular grid: every 8th row, every 64th pixel.
-	 * In UYVY the byte layout per two pixels is [U0 Y0 V0 Y1], so Y bytes
-	 * are at odd positions: 1, 3, 5 ... Step 128 bytes = 64 pixels.
+	 * For packed 4:2:2 formats (UYVY/YUYV), read Y from alternating bytes.
+	 * For planar/semi-planar YUV formats, plane 0 is a pure Y plane.
 	 */
 	uint64_t ySum = 0;
 	unsigned int count = 0;
 	for (unsigned int row = 0; row < size_.height; row += 8) {
 		const uint8_t *line = data + row * stride;
-		for (unsigned int col = 1; col < stride; col += 128) {
-			ySum += line[col];
-			count++;
+
+		if (isUyvy || isYuyv) {
+			const unsigned int yOffset = isUyvy ? 1 : 0;
+			for (unsigned int col = yOffset; col + 1 < stride; col += 128) {
+				ySum += line[col];
+				count++;
+			}
+		} else {
+			for (unsigned int col = 0; col < size_.width && col < stride; col += 64) {
+				ySum += line[col];
+				count++;
+			}
 		}
 	}
 
