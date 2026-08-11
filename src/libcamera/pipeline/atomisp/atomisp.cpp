@@ -1405,7 +1405,22 @@ void AtomispCameraData::setSensorControls(const ControlList &sensorControls)
 	 */
 	if (!frameStartEmitter_) {
 		ControlList ctrls(sensorControls);
-		sensor_->setControls(&ctrls);
+		int ret = sensor_->setControls(&ctrls);
+		if (ret) {
+			LOG(AtomispPipeline, Warning)
+				<< "AtomISP AE: batched sensor controls failed: " << ret
+				<< ", falling back to per-control writes";
+
+			for (const auto &[id, value] : sensorControls) {
+				ControlList oneCtrl(sensor_->controls());
+				oneCtrl.set(id, value);
+				ret = sensor_->setControls(&oneCtrl);
+				if (ret)
+					LOG(AtomispPipeline, Warning)
+						<< "AtomISP AE: failed to apply control "
+						<< utils::hex(id) << ": " << ret;
+			}
+		}
 	}
 }
 
