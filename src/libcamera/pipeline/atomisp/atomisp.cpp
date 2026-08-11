@@ -796,22 +796,16 @@ AtomispCameraData::AtomispCameraData(AtomispPipelineHandler *pipe,
 	std::unordered_map<uint32_t, DelayedControls::ControlParams> params = {
 		{ V4L2_CID_ANALOGUE_GAIN, { delays.gainDelay, false } },
 		{ V4L2_CID_EXPOSURE, { delays.exposureDelay, false } },
+		{ V4L2_CID_VBLANK, { 0, false } },
 	};
 	delayedCtrls_ = std::make_unique<DelayedControls>(sensor_->device(), params);
 
-	LOG(AtomispPipeline, Debug)
-		<< "Found pipeline: "
-		<< utils::join(entities_, " -> ",
-			       [](const Entity &e) {
-				       std::string s = "[";
-				       if (e.sink)
-					       s += std::to_string(e.sink->index()) + '|';
-				       s += e.entity->name();
-				       if (e.source)
-					       s += '|' + std::to_string(e.source->index());
-				       s += ']';
-				       return s;
-			       });
+	/*
+	 * The AtomISP is the pipeline master; the sensor subdev does not
+	 * generate frame-start events in this configuration.  Force direct
+	 * control application so AeLoop changes take effect immediately.
+	 */
+	frameStartEmitter_ = nullptr;
 }
 
 AtomispPipelineHandler *AtomispCameraData::pipe()
@@ -896,20 +890,6 @@ int AtomispCameraData::init()
 	}
 
 	properties_ = sensor_->properties();
-
-	/* Find the first subdev that can generate a frame start signal, if any. */
-	frameStartEmitter_ = nullptr;
-	for (const Entity &entity : entities_) {
-		V4L2Subdevice *sd = pipe->subdev(entity.entity);
-		if (!sd || !sd->supportsFrameStartEvent())
-			continue;
-
-		LOG(AtomispPipeline, Debug)
-			<< "Using frameStart signal from '"
-			<< entity.entity->name() << "'";
-		frameStartEmitter_ = sd;
-		break;
-	}
 
 	return 0;
 }
