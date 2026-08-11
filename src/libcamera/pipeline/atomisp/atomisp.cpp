@@ -2106,9 +2106,6 @@ int AtomispPipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 			data->rawStream_ = &data->streams_[i];
 	}
 
-	if (outputCfgs.empty())
-		return 0;
-
 	/* Configure the AtomISP luminance AE loop when applicable */
 	if (atomispQuirks_) {
 		PixelFormat capturePf = captureFormat.fourcc.toPixelFormat();
@@ -2125,6 +2122,9 @@ int AtomispPipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 			data->atomispAe_->bootstrap();
 		}
 	}
+
+	if (outputCfgs.empty())
+		return 0;
 
 	StreamConfiguration inputCfg;
 	inputCfg.pixelFormat = videoFormat.toPixelFormat();
