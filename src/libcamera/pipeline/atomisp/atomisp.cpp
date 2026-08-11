@@ -2122,6 +2122,7 @@ int AtomispPipelineHandler::start(Camera *camera, [[maybe_unused]] const Control
 	AtomispCameraData *data = cameraData(camera);
 	V4L2VideoDevice *video = data->video_;
 	V4L2Subdevice *frameStartEmitter = data->frameStartEmitter_;
+	AtomispPipelineHandler *pipe = data->pipe();
 	int ret;
 
 	const MediaPad *pad = acquirePipeline(data);
@@ -2153,6 +2154,31 @@ int AtomispPipelineHandler::start(Camera *camera, [[maybe_unused]] const Control
 	}
 
 	video->bufferReady.connect(data, &AtomispCameraData::imageBufferReady);
+
+	/* Keep sensor firmware AE disabled: AtomISP AE loop drives exposure/gain. */
+	for (const AtomispCameraData::Entity &entity : data->entities_) {
+		V4L2Subdevice *sd = pipe->subdev(entity.entity);
+		if (!sd)
+			continue;
+
+		const ControlInfoMap &ctrls = sd->controls();
+		auto it = ctrls.find(V4L2_CID_EXPOSURE_AUTO);
+		if (it == ctrls.end())
+			continue;
+
+		ControlList ifpCtrls(ctrls);
+		ifpCtrls.set(V4L2_CID_EXPOSURE_AUTO, V4L2_EXPOSURE_MANUAL);
+		ret = sd->setControls(&ifpCtrls);
+		if (ret)
+			LOG(AtomispPipeline, Warning)
+				<< "Failed to set exposure_auto=MANUAL on "
+				<< sd->entity()->name() << ": " << ret;
+		else
+			LOG(AtomispPipeline, Debug)
+				<< "Set exposure_auto=MANUAL on "
+				<< sd->entity()->name();
+		break;
+	}
 
 	data->delayedCtrls_->reset();
 	if (frameStartEmitter) {
