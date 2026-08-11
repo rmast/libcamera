@@ -297,16 +297,21 @@ private:
 	Size size_;
 
 	int32_t exposure_ = 0, exposureMin_ = 0, exposureMax_ = 0;
+	int32_t vblank_ = 0, vblankMin_ = 0, vblankMax_ = 0;
+	/* Sensor active frame height derived from vblank max (65535 - vblank_max). */
+	int32_t height_ = 0;
 	double gain_ = 1.0, gainMin_ = 1.0, gainMax_ = 1.0;
 	unsigned int bpl_ = 0;
 
 	/* Process every kInterval frames; slow enough for sensor response */
 	static constexpr unsigned int kInterval = 15;
-	/* Match the soft-IPA AGC controller constants */
+	/* MSV target and controller constants */
 	static constexpr double kOptimalMsv = 2.5;
 	static constexpr double kSatisfactory = 0.3;
 	static constexpr double kPGain = 0.02;
 	static constexpr double kMaxStep = 0.10;
+	/* MT9M114 CAM_SENSOR_CFG_FRAME_LENGTH_LINES_MAX */
+	static constexpr int32_t kFllMax = 65535;
 };
 
 bool AtomispAeLoop::configure(const CameraSensor *sensor,
@@ -327,8 +332,7 @@ bool AtomispAeLoop::configure(const CameraSensor *sensor,
 	}
 	exposureMin_ = itExp->second.min().get<int32_t>();
 	exposureMax_ = itExp->second.max().get<int32_t>();
-	/* Start at 75% of range so the first frame is usable, not too dark. */
-	exposure_ = exposureMin_ + (exposureMax_ - exposureMin_) * 3 / 4;
+	exposure_ = itExp->second.def().get<int32_t>();
 
 	auto itGain = ctrls.find(V4L2_CID_ANALOGUE_GAIN);
 	if (itGain == ctrls.end()) {
@@ -339,20 +343,41 @@ bool AtomispAeLoop::configure(const CameraSensor *sensor,
 	gainMax_ = itGain->second.max().get<int32_t>();
 	gain_ = itGain->second.def().get<int32_t>();
 
+	/*
+	 * Derive the sensor active frame height from the vblank max:
+	 *   vblank_max = FRAME_LENGTH_LINES_MAX - height  (driver formula)
+	 * so height = kFllMax - vblank_max.
+	 * This gives the correct exposure ceiling for the current mode,
+	 * including binned modes where the static driver default (995) is wrong.
+	 */
+	auto itVblank = ctrls.find(V4L2_CID_VBLANK);
+	if (itVblank != ctrls.end()) {
+		vblankMin_ = itVblank->second.min().get<int32_t>();
+		vblankMax_ = itVblank->second.max().get<int32_t>();
+		vblank_ = itVblank->second.def().get<int32_t>();
+		height_ = kFllMax - vblankMax_;
+		/* Recompute exposure max from actual frame height + current vblank. */
+		exposureMax_ = height_ + vblank_ - 2;
+		exposure_ = std::min(exposure_, exposureMax_);
+	}
+
 	LOG(AtomispPipeline, Debug)
 		<< "AtomISP AE configured: exp [" << exposureMin_ << ".."
 		<< exposureMax_ << "] def=" << exposure_
-		<< " gain [" << gainMin_ << ".." << gainMax_ << "] def=" << gain_;
+		<< " gain [" << gainMin_ << ".." << gainMax_ << "] def=" << gain_
+		<< " height=" << height_ << " vblank=" << vblank_;
 
 	return true;
 }
 
 void AtomispAeLoop::bootstrap()
 {
-	/* Emit initial controls so hardware starts at a usable exposure. */
+	/* Emit initial controls so hardware starts at the known-safe default. */
 	ControlList sensorCtrls(sensor_->controls());
 	sensorCtrls.set(V4L2_CID_EXPOSURE, exposure_);
 	sensorCtrls.set(V4L2_CID_ANALOGUE_GAIN, static_cast<int32_t>(gain_));
+	if (height_ > 0)
+		sensorCtrls.set(V4L2_CID_VBLANK, vblank_);
 	setSensorControls.emit(sensorCtrls);
 }
 
@@ -407,31 +432,54 @@ void AtomispAeLoop::updateExposure(double msv)
 
 	double step = std::clamp(error * kPGain, -kMaxStep, kMaxStep);
 	double factor = 1.0 + step;
+	bool changed = false;
 
 	if (factor > 1.0) {
-		/* Too dark: raise exposure first, then gain */
+		/* Too dark: raise exposure → extend vblank → raise gain */
 		if (exposure_ < exposureMax_) {
 			int32_t next = static_cast<int32_t>(exposure_ * factor);
-			exposure_ = std::max(next, exposure_ + 1);
-		} else {
+			exposure_ = std::clamp(std::max(next, exposure_ + 1),
+					       exposureMin_, exposureMax_);
+			changed = true;
+		} else if (height_ > 0 && vblank_ < vblankMax_) {
+			/* Extend frame to allow longer exposure (reduces fps). */
+			int32_t next = static_cast<int32_t>(vblank_ * factor);
+			vblank_ = std::min(std::max(next, vblank_ + 1), vblankMax_);
+			exposureMax_ = height_ + vblank_ - 2;
+			exposure_ = exposureMax_;
+			changed = true;
+		} else if (gain_ < gainMax_) {
 			gain_ = std::min(gain_ * factor, gainMax_);
+			changed = true;
 		}
 	} else {
-		/* Too bright: lower gain first, then exposure */
+		/* Too bright: lower gain → lower exposure → restore vblank */
 		if (gain_ > gainMin_) {
 			gain_ = std::max(gain_ * factor, gainMin_);
-		} else {
+			changed = true;
+		} else if (exposure_ > exposureMin_) {
 			int32_t next = static_cast<int32_t>(exposure_ * factor);
-			exposure_ = std::min(next, exposure_ - 1);
+			exposure_ = std::clamp(std::min(next, exposure_ - 1),
+					       exposureMin_, exposureMax_);
+			changed = true;
+		} else if (height_ > 0 && vblank_ > vblankMin_) {
+			/* Restore normal framerate once exposure is back at min. */
+			int32_t next = static_cast<int32_t>(vblank_ * factor);
+			vblank_ = std::max(std::min(next, vblank_ - 1), vblankMin_);
+			exposureMax_ = height_ + vblank_ - 2;
+			exposure_ = std::min(exposure_, exposureMax_);
+			changed = true;
 		}
 	}
 
-	exposure_ = std::clamp(exposure_, exposureMin_, exposureMax_);
-	gain_ = std::clamp(gain_, gainMin_, gainMax_);
+	if (!changed)
+		return;
 
 	ControlList sensorCtrls(sensor_->controls());
 	sensorCtrls.set(V4L2_CID_EXPOSURE, exposure_);
 	sensorCtrls.set(V4L2_CID_ANALOGUE_GAIN, static_cast<int32_t>(gain_));
+	if (height_ > 0)
+		sensorCtrls.set(V4L2_CID_VBLANK, vblank_);
 	setSensorControls.emit(sensorCtrls);
 }
 
