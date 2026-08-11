@@ -314,6 +314,9 @@ private:
 	static constexpr int32_t kFllMax = 65535;
 	/* Limit vblank to this multiple of normal FLL to keep fps ≥ 1/kMaxVblankFactor. */
 	static constexpr int32_t kMaxVblankFactor = 6;
+
+	bool warnedUnsupportedFormat_ = false;
+	unsigned int sampleCount_ = 0;
 };
 
 bool AtomispAeLoop::configure(CameraSensor *sensor,
@@ -381,7 +384,8 @@ bool AtomispAeLoop::configure(CameraSensor *sensor,
 		<< "AtomISP AE configured: exp [" << exposureMin_ << ".."
 		<< exposureMax_ << "] hw=" << exposure_
 		<< " gain [" << gainMin_ << ".." << gainMax_ << "] hw=" << gain_
-		<< " height=" << height_ << " vblankPracticalMax=" << vblankPracticalMax_;
+		<< " height=" << height_ << " vblankPracticalMax=" << vblankPracticalMax_
+		<< " format=" << format_ << " size=" << size_ << " bpl=" << bpl_;
 
 	return true;
 }
@@ -395,6 +399,10 @@ void AtomispAeLoop::bootstrap()
 	if (height_ > 0)
 		sensorCtrls.set(V4L2_CID_VBLANK, vblank_);
 	setSensorControls.emit(sensorCtrls);
+	LOG(AtomispPipeline, Debug)
+		<< "AtomISP AE bootstrap: exp=" << exposure_
+		<< " gain=" << static_cast<int32_t>(gain_)
+		<< " vblank=" << vblank_;
 }
 
 void AtomispAeLoop::processBuffer(uint32_t sequence, FrameBuffer *buffer)
@@ -411,7 +419,15 @@ void AtomispAeLoop::processBuffer(uint32_t sequence, FrameBuffer *buffer)
 		format_ == formats::YUV444;
 
 	if (!isUyvy && !isYuyv && !isLumaPlane0)
+	{
+		if (!warnedUnsupportedFormat_) {
+			LOG(AtomispPipeline, Warning)
+				<< "AtomISP AE: unsupported capture format " << format_
+				<< ", sampling disabled";
+			warnedUnsupportedFormat_ = true;
+		}
 		return;
+	}
 
 	MappedFrameBuffer in(buffer, MappedFrameBuffer::MapFlag::Read);
 	if (!in.isValid()) {
@@ -452,6 +468,12 @@ void AtomispAeLoop::processBuffer(uint32_t sequence, FrameBuffer *buffer)
 
 	/* Scale mean Y (0-255) to MSV range (0-5) matching the soft-IPA AGC */
 	double msv = static_cast<double>(ySum) / count * 5.0 / 255.0;
+	if ((sampleCount_++ % 20) == 0)
+		LOG(AtomispPipeline, Debug)
+			<< "AtomISP AE sample: seq=" << sequence
+			<< " msv=" << msv << " exp=" << exposure_
+			<< " gain=" << static_cast<int32_t>(gain_)
+			<< " vblank=" << vblank_;
 	updateExposure(msv);
 }
 
@@ -512,6 +534,11 @@ void AtomispAeLoop::updateExposure(double msv)
 	if (height_ > 0)
 		sensorCtrls.set(V4L2_CID_VBLANK, vblank_);
 	setSensorControls.emit(sensorCtrls);
+
+	LOG(AtomispPipeline, Debug)
+		<< "AtomISP AE update: msv=" << msv
+		<< " exp=" << exposure_ << " gain=" << static_cast<int32_t>(gain_)
+		<< " vblank=" << vblank_ << " expMax=" << exposureMax_;
 }
 
 class AtomispCameraData : public Camera::Private
