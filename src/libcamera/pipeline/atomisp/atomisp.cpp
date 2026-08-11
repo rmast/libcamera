@@ -284,7 +284,8 @@ public:
 	Signal<const ControlList &> setSensorControls;
 
 	bool configure(const CameraSensor *sensor,
-		       const PixelFormat &format, const Size &size);
+		       const PixelFormat &format, const Size &size,
+		       unsigned int bpl);
 	void bootstrap();
 	void processBuffer(uint32_t sequence, FrameBuffer *buffer);
 
@@ -297,6 +298,7 @@ private:
 
 	int32_t exposure_ = 0, exposureMin_ = 0, exposureMax_ = 0;
 	double gain_ = 1.0, gainMin_ = 1.0, gainMax_ = 1.0;
+	unsigned int bpl_ = 0;
 
 	/* Process every kInterval frames; slow enough for sensor response */
 	static constexpr unsigned int kInterval = 15;
@@ -308,11 +310,13 @@ private:
 };
 
 bool AtomispAeLoop::configure(const CameraSensor *sensor,
-			      const PixelFormat &format, const Size &size)
+			      const PixelFormat &format, const Size &size,
+			      unsigned int bpl)
 {
 	sensor_ = sensor;
 	format_ = format;
 	size_ = size;
+	bpl_ = bpl;
 
 	const ControlInfoMap &ctrls = sensor->controls();
 
@@ -323,7 +327,8 @@ bool AtomispAeLoop::configure(const CameraSensor *sensor,
 	}
 	exposureMin_ = itExp->second.min().get<int32_t>();
 	exposureMax_ = itExp->second.max().get<int32_t>();
-	exposure_ = itExp->second.def().get<int32_t>();
+	/* Start at 75% of range so the first frame is usable, not too dark. */
+	exposure_ = exposureMin_ + (exposureMax_ - exposureMin_) * 3 / 4;
 
 	auto itGain = ctrls.find(V4L2_CID_ANALOGUE_GAIN);
 	if (itGain == ctrls.end()) {
@@ -367,8 +372,8 @@ void AtomispAeLoop::processBuffer(uint32_t sequence, FrameBuffer *buffer)
 	}
 
 	const uint8_t *data = in.planes()[0].begin();
-	/* UYVY: 2 bytes per pixel, so stride = width * 2 */
-	const unsigned int stride = size_.width * 2;
+	/* Use the actual hardware bpl (ISP may add 64-byte padding). */
+	const unsigned int stride = bpl_;
 
 	/*
 	 * Sample Y over a regular grid: every 8th row, every 64th pixel.
@@ -2008,7 +2013,8 @@ int AtomispPipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 		PixelFormat capturePf = captureFormat.fourcc.toPixelFormat();
 		data->atomispAe_ = std::make_unique<AtomispAeLoop>();
 		if (!data->atomispAe_->configure(data->sensor_.get(),
-						 capturePf, captureSize)) {
+						 capturePf, captureSize,
+						 captureFormat.planes[0].bpl)) {
 			LOG(AtomispPipeline, Warning) << "AtomISP AE loop disabled";
 			data->atomispAe_.reset();
 		} else {
