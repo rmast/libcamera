@@ -298,13 +298,13 @@ private:
 	int32_t exposure_ = 0, exposureMin_ = 0, exposureMax_ = 0;
 	double gain_ = 1.0, gainMin_ = 1.0, gainMax_ = 1.0;
 
-	/* Process every kInterval frames to keep CPU load low */
-	static constexpr unsigned int kInterval = 3;
+	/* Process every kInterval frames; slow enough for sensor response */
+	static constexpr unsigned int kInterval = 15;
 	/* Match the soft-IPA AGC controller constants */
 	static constexpr double kOptimalMsv = 2.5;
-	static constexpr double kSatisfactory = 0.2;
-	static constexpr double kPGain = 0.04;
-	static constexpr double kMaxStep = 0.15;
+	static constexpr double kSatisfactory = 0.3;
+	static constexpr double kPGain = 0.02;
+	static constexpr double kMaxStep = 0.10;
 };
 
 bool AtomispAeLoop::configure(const CameraSensor *sensor,
