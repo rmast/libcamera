@@ -290,6 +290,7 @@ public:
 	void processBuffer(uint32_t sequence, FrameBuffer *buffer);
 
 private:
+	void syncFromHardware();
 	void updateExposure(double msv);
 
 	CameraSensor *sensor_ = nullptr;
@@ -312,8 +313,8 @@ private:
 	static constexpr double kMaxStep = 0.10;
 	/* MT9M114 CAM_SENSOR_CFG_FRAME_LENGTH_LINES_MAX */
 	static constexpr int32_t kFllMax = 65535;
-	/* Limit vblank to this multiple of normal FLL to keep fps ≥ 1/kMaxVblankFactor. */
-	static constexpr int32_t kMaxVblankFactor = 6;
+	/* Limit vblank to this multiple of normal FLL (30 -> allow down to ~1fps). */
+	static constexpr int32_t kMaxVblankFactor = 30;
 
 	bool warnedUnsupportedFormat_ = false;
 	unsigned int sampleCount_ = 0;
@@ -477,8 +478,37 @@ void AtomispAeLoop::processBuffer(uint32_t sequence, FrameBuffer *buffer)
 	updateExposure(msv);
 }
 
+void AtomispAeLoop::syncFromHardware()
+{
+	std::array<uint32_t, 3> ids = {
+		V4L2_CID_EXPOSURE,
+		V4L2_CID_ANALOGUE_GAIN,
+		V4L2_CID_VBLANK,
+	};
+
+	ControlList hwCtrls = sensor_->getControls(ids);
+	if (hwCtrls.empty())
+		return;
+
+	int32_t hwExposure = hwCtrls.get(V4L2_CID_EXPOSURE).get<int32_t>();
+	int32_t hwGain = hwCtrls.get(V4L2_CID_ANALOGUE_GAIN).get<int32_t>();
+
+	exposure_ = std::clamp(hwExposure, exposureMin_, exposureMax_);
+	gain_ = std::clamp(static_cast<double>(hwGain), gainMin_, gainMax_);
+
+	if (height_ > 0) {
+		int32_t hwVblank = hwCtrls.get(V4L2_CID_VBLANK).get<int32_t>();
+		vblank_ = std::clamp(hwVblank, vblankMin_, vblankMax_);
+		exposureMax_ = std::max(exposureMin_, height_ + vblank_ - 2);
+		exposure_ = std::min(exposure_, exposureMax_);
+	}
+}
+
 void AtomispAeLoop::updateExposure(double msv)
 {
+	/* Track manual writes so AE can continue from the real hardware state. */
+	syncFromHardware();
+
 	double error = kOptimalMsv - msv;
 
 	if (std::abs(error) <= kSatisfactory)
