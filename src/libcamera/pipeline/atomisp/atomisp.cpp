@@ -52,6 +52,8 @@
 #include "libcamera/internal/v4l2_subdevice.h"
 #include "libcamera/internal/v4l2_videodevice.h"
 
+#include "atomisp_helpers.h"
+
 namespace libcamera {
 
 LOG_DEFINE_CATEGORY(AtomispPipeline)
@@ -287,7 +289,7 @@ public:
 		       const PixelFormat &format, const Size &size,
 		       unsigned int bpl);
 	void bootstrap();
-	void processBuffer(uint32_t sequence, FrameBuffer *buffer);
+	void processBuffer(FrameBuffer *buffer);
 
 private:
 	void syncFromHardware();
@@ -319,8 +321,7 @@ private:
 	/* Limit vblank to this multiple of normal FLL (30 -> allow down to ~1fps). */
 	static constexpr int32_t kMaxVblankFactor = 45;
 
-	bool warnedUnsupportedFormat_ = false;
-	unsigned int sampleCount_ = 0;
+	unsigned int frameCount_ = 0;
 };
 
 bool AtomispAeLoop::configure(CameraSensor *sensor,
@@ -356,7 +357,7 @@ bool AtomispAeLoop::configure(CameraSensor *sensor,
 	 * where the static driver max (995) is wrong (e.g. 643 for a 624-line mode).
 	 */
 	auto itVblank = ctrls.find(V4L2_CID_VBLANK);
-	if (itVblank != ctrls.end()) {
+	if (sensor->model() == "mt9m114" && itVblank != ctrls.end()) {
 		vblankMin_ = itVblank->second.min().get<int32_t>();
 		vblankMax_ = itVblank->second.max().get<int32_t>();
 		vblank_ = vblankMin_;
@@ -409,29 +410,16 @@ void AtomispAeLoop::bootstrap()
 		<< " vblank=" << vblank_;
 }
 
-void AtomispAeLoop::processBuffer(uint32_t sequence, FrameBuffer *buffer)
+void AtomispAeLoop::processBuffer(FrameBuffer *buffer)
 {
-	if (sequence % kInterval != 0)
+	if (!atomispAeCadenceFrame(frameCount_++, kInterval))
 		return;
 
 	const bool isUyvy = format_ == formats::UYVY;
 	const bool isYuyv = format_ == formats::YUYV;
-	const bool isLumaPlane0 =
-		format_ == formats::NV12 || format_ == formats::NV21 ||
-		format_ == formats::YUV420 || format_ == formats::YVU420 ||
-		format_ == formats::NV16 || format_ == formats::YUV422 ||
-		format_ == formats::YUV444;
 
-	if (!isUyvy && !isYuyv && !isLumaPlane0)
-	{
-		if (!warnedUnsupportedFormat_) {
-			LOG(AtomispPipeline, Warning)
-				<< "AtomISP AE: unsupported capture format " << format_
-				<< ", sampling disabled";
-			warnedUnsupportedFormat_ = true;
-		}
+	if (!isUyvy && !isYuyv)
 		return;
-	}
 
 	MappedFrameBuffer in(buffer, MappedFrameBuffer::MapFlag::Read);
 	if (!in.isValid()) {
@@ -446,24 +434,15 @@ void AtomispAeLoop::processBuffer(uint32_t sequence, FrameBuffer *buffer)
 	/*
 	 * Sample Y over a regular grid: every 8th row, every 64th pixel.
 	 * For packed 4:2:2 formats (UYVY/YUYV), read Y from alternating bytes.
-	 * For planar/semi-planar YUV formats, plane 0 is a pure Y plane.
 	 */
 	uint64_t ySum = 0;
 	unsigned int count = 0;
 	for (unsigned int row = 0; row < size_.height; row += 8) {
 		const uint8_t *line = data + row * stride;
-
-		if (isUyvy || isYuyv) {
-			const unsigned int yOffset = isUyvy ? 1 : 0;
-			for (unsigned int col = yOffset; col + 1 < stride; col += 128) {
-				ySum += line[col];
-				count++;
-			}
-		} else {
-			for (unsigned int col = 0; col < size_.width && col < stride; col += 64) {
-				ySum += line[col];
-				count++;
-			}
+		const unsigned int yOffset = isUyvy ? 1 : 0;
+		for (unsigned int col = yOffset; col + 1 < stride; col += 128) {
+			ySum += line[col];
+			count++;
 		}
 	}
 
@@ -472,12 +451,6 @@ void AtomispAeLoop::processBuffer(uint32_t sequence, FrameBuffer *buffer)
 
 	/* Scale mean Y (0-255) to MSV range (0-5) matching the soft-IPA AGC */
 	double msv = static_cast<double>(ySum) / count * 5.0 / 255.0;
-	if ((sampleCount_++ % 20) == 0)
-		LOG(AtomispPipeline, Debug)
-			<< "AtomISP AE sample: seq=" << sequence
-			<< " msv=" << msv << " exp=" << exposure_
-			<< " gain=" << static_cast<int32_t>(gain_)
-			<< " vblank=" << vblank_;
 	updateExposure(msv);
 }
 
@@ -653,7 +626,6 @@ public:
 	std::list<Entity> entities_;
 	std::unique_ptr<CameraSensor> sensor_;
 	V4L2VideoDevice *video_;
-	V4L2Subdevice *frameStartEmitter_;
 
 	std::vector<Configuration> configs_;
 	std::map<PixelFormat, std::vector<const Configuration *>> formats_;
@@ -888,12 +860,6 @@ AtomispCameraData::AtomispCameraData(AtomispPipelineHandler *pipe,
 	};
 	delayedCtrls_ = std::make_unique<DelayedControls>(sensor_->device(), params);
 
-	/*
-	 * The AtomISP is the pipeline master; the sensor subdev does not
-	 * generate frame-start events in this configuration.  Force direct
-	 * control application so AeLoop changes take effect immediately.
-	 */
-	frameStartEmitter_ = nullptr;
 }
 
 AtomispPipelineHandler *AtomispCameraData::pipe()
@@ -1345,7 +1311,7 @@ void AtomispCameraData::imageBufferReady(FrameBuffer *buffer)
 
 	/* Sample luminance for AtomISP AE on every successful capture buffer */
 	if (atomispAe_)
-		atomispAe_->processBuffer(buffer->metadata().sequence, buffer);
+		atomispAe_->processBuffer(buffer);
 
 	/*
 	 * Queue the captured and the request buffer to the converter or Software
@@ -1447,32 +1413,21 @@ void AtomispCameraData::metadataReady(uint32_t frame, const ControlList &metadat
 
 void AtomispCameraData::setSensorControls(const ControlList &sensorControls)
 {
-	delayedCtrls_->push(sensorControls);
-	/*
-	 * Directly apply controls now if there is no frameStart signal.
-	 *
-	 * \todo Applying controls directly not only increases the risk of
-	 * applying them to the wrong frame (or across a frame boundary),
-	 * but it also bypasses delayedCtrls_, creating AGC regulation issues.
-	 * Both problems should be fixed.
-	 */
-	if (!frameStartEmitter_) {
-		ControlList ctrls(sensorControls);
-		int ret = sensor_->setControls(&ctrls);
-		if (ret) {
-			LOG(AtomispPipeline, Warning)
-				<< "AtomISP AE: batched sensor controls failed: " << ret
-				<< ", falling back to per-control writes";
+	ControlList ctrls(sensorControls);
+	int ret = sensor_->setControls(&ctrls);
+	if (ret) {
+		LOG(AtomispPipeline, Warning)
+			<< "AtomISP AE: batched sensor controls failed: " << ret
+			<< ", falling back to per-control writes";
 
-			for (const auto &[id, value] : sensorControls) {
-				ControlList oneCtrl(sensor_->controls());
-				oneCtrl.set(id, value);
-				ret = sensor_->setControls(&oneCtrl);
-				if (ret)
-					LOG(AtomispPipeline, Warning)
-						<< "AtomISP AE: failed to apply control "
-						<< utils::hex(id) << ": " << ret;
-			}
+		for (const auto &[id, value] : sensorControls) {
+			ControlList oneCtrl(sensor_->controls());
+			oneCtrl.set(id, value);
+			ret = sensor_->setControls(&oneCtrl);
+			if (ret)
+				LOG(AtomispPipeline, Warning)
+					<< "AtomISP AE: failed to apply control "
+					<< utils::hex(id) << ": " << ret;
 		}
 	}
 }
@@ -1571,7 +1526,8 @@ CameraConfiguration::Status AtomispCameraConfiguration::validate()
 		combinedTransform_ = sensor->computeTransform(&orientation);
 		if (!!(combinedTransform_ & Transform::Transpose)) {
 			combinedTransform_ = Transform::Identity;
-			orientation = requestedOrientation;
+			orientation = sensor->mountingOrientation();
+			status = Adjusted;
 		} else if (orientation != requestedOrientation) {
 			status = Adjusted;
 		}
@@ -1658,15 +1614,8 @@ CameraConfiguration::Status AtomispCameraConfiguration::validate()
 	const bool requireNonRawCapture =
 		data_->pipe()->atomispQuirks() && maxRawStreamSize.isNull();
 	auto atomispCaptureFormatScore = [](PixelFormat format) {
-		/* Prefer packed interleaved YUV; accept any non-raw YUV format */
 		if (format == PixelFormat{ V4L2_PIX_FMT_UYVY }) return 0;
 		if (format == PixelFormat{ V4L2_PIX_FMT_YUYV }) return 1;
-		if (format == PixelFormat{ V4L2_PIX_FMT_NV12 }) return 2;
-		if (format == PixelFormat{ V4L2_PIX_FMT_NV21 }) return 3;
-		if (format == PixelFormat{ V4L2_PIX_FMT_YUV420 }) return 4;
-		if (format == PixelFormat{ V4L2_PIX_FMT_YVU420 }) return 5;
-		if (format == PixelFormat{ V4L2_PIX_FMT_NV16 }) return 6;
-		if (!BayerFormat::fromPixelFormat(format).isValid()) return 7;
 		return -1;
 	};
 
@@ -1960,16 +1909,9 @@ AtomispPipelineHandler::generateConfiguration(Camera *camera, Span<const StreamR
 	 */
 		auto pickDefaultFormat = [&](const auto &formats, bool processed) {
 			if (data->pipe()->atomispQuirks() && processed) {
-			static const std::array<PixelFormat, 9> preferredFormats = {
+				static const std::array<PixelFormat, 2> preferredFormats = {
 				PixelFormat{ V4L2_PIX_FMT_UYVY },
 				PixelFormat{ V4L2_PIX_FMT_YUYV },
-				PixelFormat{ V4L2_PIX_FMT_NV12 },
-				PixelFormat{ V4L2_PIX_FMT_NV21 },
-				PixelFormat{ V4L2_PIX_FMT_YUV420 },
-				PixelFormat{ V4L2_PIX_FMT_YVU420 },
-				PixelFormat{ V4L2_PIX_FMT_YUV422P },
-				PixelFormat{ V4L2_PIX_FMT_YUV444 },
-				PixelFormat{ V4L2_PIX_FMT_NV16 },
 			};
 
 			for (const PixelFormat &preferredFormat : preferredFormats) {
@@ -2123,7 +2065,7 @@ int AtomispPipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 			}
 			cfg.stride = captureFormat.planes[0].bpl;
 			cfg.frameSize = captureFormat.planes[0].size;
-			LOG(AtomispPipeline, Info)
+			LOG(AtomispPipeline, Debug)
 				<< "AtomISP stream layout: format=" << cfg.pixelFormat
 				<< " size=" << cfg.size << " stride=" << cfg.stride
 				<< " frameSize=" << cfg.frameSize
@@ -2149,8 +2091,6 @@ int AtomispPipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 		} else {
 			data->atomispAe_->setSensorControls.connect(
 				data, &AtomispCameraData::setSensorControls);
-			/* Write initial exposure/gain so hardware starts bright. */
-			data->atomispAe_->bootstrap();
 		}
 	}
 
@@ -2194,7 +2134,6 @@ int AtomispPipelineHandler::start(Camera *camera, [[maybe_unused]] const Control
 {
 	AtomispCameraData *data = cameraData(camera);
 	V4L2VideoDevice *video = data->video_;
-	V4L2Subdevice *frameStartEmitter = data->frameStartEmitter_;
 	AtomispPipelineHandler *pipe = data->pipe();
 	int ret;
 
@@ -2253,30 +2192,10 @@ int AtomispPipelineHandler::start(Camera *camera, [[maybe_unused]] const Control
 		break;
 	}
 
+	if (data->atomispAe_)
+		data->atomispAe_->bootstrap();
+
 	data->delayedCtrls_->reset();
-	if (frameStartEmitter) {
-		ret = frameStartEmitter->setFrameStartEnabled(true);
-		if (ret) {
-			if (atomispQuirks_) {
-				/*
-				 * On AtomISP, frame-start enabling can fail at runtime despite
-				 * the entity advertising support. Continue without frame-start
-				 * driven delayed controls so streaming can still operate.
-				 */
-				LOG(AtomispPipeline, Warning)
-					<< "Frame start events unavailable on "
-					<< frameStartEmitter->entity()->name() << ": "
-					<< strerror(-ret) << " (" << ret << "), continuing without them";
-				frameStartEmitter = nullptr;
-			} else {
-				stop(camera);
-				return ret;
-			}
-		} else {
-			frameStartEmitter->frameStart.connect(data->delayedCtrls_.get(),
-						      &DelayedControls::applyControls);
-		}
-	}
 
 	ret = video->streamOn();
 	if (ret < 0) {
@@ -2310,13 +2229,6 @@ void AtomispPipelineHandler::stopDevice(Camera *camera)
 {
 	AtomispCameraData *data = cameraData(camera);
 	V4L2VideoDevice *video = data->video_;
-	V4L2Subdevice *frameStartEmitter = data->frameStartEmitter_;
-
-	if (frameStartEmitter) {
-		frameStartEmitter->setFrameStartEnabled(false);
-		frameStartEmitter->frameStart.disconnect(data->delayedCtrls_.get(),
-							 &DelayedControls::applyControls);
-	}
 
 	if (data->useConversion_) {
 		if (data->converter_)

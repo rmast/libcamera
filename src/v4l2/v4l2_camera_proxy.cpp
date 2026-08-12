@@ -30,6 +30,7 @@
 
 #include "v4l2_camera.h"
 #include "v4l2_camera_file.h"
+#include "v4l2_camera_proxy_helpers.h"
 #include "v4l2_compat_manager.h"
 
 #define KERNEL_VERSION(a, b, c) (((a) << 16) + ((b) << 8) + (c))
@@ -195,13 +196,13 @@ void V4L2CameraProxy::setFmtFromConfig(const StreamConfiguration &streamConfig)
 	v4l2PixFormat_.quantization = V4L2_QUANTIZATION_DEFAULT;
 	v4l2PixFormat_.xfer_func    = V4L2_XFER_FUNC_DEFAULT;
 
-	if ((format == formats::UYVY || format == formats::YUYV) &&
-	    streamConfig.stride > size.width * 2)
-		v4l2PixFormat_.width = streamConfig.stride / 2;
+	v4l2PixFormat_.width = v4l2CompatExposedWidth(
+		format == formats::UYVY || format == formats::YUYV,
+		size.width, streamConfig.stride);
 
 	sizeimage_ = streamConfig.frameSize;
 
-	LOG(V4L2Compat, Info)
+	LOG(V4L2Compat, Debug)
 		<< "V4L2 proxy layout: format=" << streamConfig.pixelFormat
 		<< " activeSize=" << size << " exposedSize="
 		<< v4l2PixFormat_.width << "x" << v4l2PixFormat_.height

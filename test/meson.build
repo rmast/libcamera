@@ -50,6 +50,7 @@ public_tests = [
 ]
 
 internal_tests = [
+    {'name': 'atomisp-cadence', 'sources': ['atomisp-cadence.cpp']},
     {'name': 'bayer-format', 'sources': ['bayer-format.cpp']},
     {'name': 'byte-stream-buffer', 'sources': ['byte-stream-buffer.cpp']},
     {'name': 'camera-sensor', 'sources': ['camera-sensor.cpp']},
@@ -76,6 +77,7 @@ internal_tests = [
     {'name': 'utils', 'sources': ['utils.cpp']},
     {'name': 'value-node', 'sources': ['value-node.cpp']},
     {'name': 'vector', 'sources': ['vector.cpp']},
+    {'name': 'v4l2-camera-proxy', 'sources': ['v4l2-camera-proxy.cpp']},
     {'name': 'yaml-parser', 'sources': ['yaml-parser.cpp']},
 ]
 
