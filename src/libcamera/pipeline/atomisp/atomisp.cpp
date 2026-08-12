@@ -375,11 +375,9 @@ bool AtomispAeLoop::configure(CameraSensor *sensor,
 	std::array<uint32_t, 2> hwIds = { V4L2_CID_EXPOSURE, V4L2_CID_ANALOGUE_GAIN };
 	ControlList hwCtrls = sensor->getControls(hwIds);
 	if (!hwCtrls.empty()) {
-		const int32_t bootstrapExposure = exposureMin_ +
-			(exposureMax_ - exposureMin_) / 2;
 		exposure_ = std::clamp(std::max(
 				   hwCtrls.get(V4L2_CID_EXPOSURE).get<int32_t>(),
-				   bootstrapExposure),
+				   exposureMax_),
 				   exposureMin_, exposureMax_);
 		gain_ = std::clamp(static_cast<double>(
 				   hwCtrls.get(V4L2_CID_ANALOGUE_GAIN).get<int32_t>()),
@@ -522,8 +520,8 @@ void AtomispAeLoop::updateExposure(double msv)
 			changed = true;
 		} else if (height_ > 0 && vblank_ < vblankPracticalMax_) {
 			/* Extend frame time before raising exposure on the next cycle. */
-			int32_t next = static_cast<int32_t>(vblank_ * factor);
-			vblank_ = std::min(std::max(next, vblank_ + 1), vblankPracticalMax_);
+			vblank_ = atomispNextVblank(height_, vblank_, factor,
+						  vblankPracticalMax_);
 			exposureMax_ = height_ + vblank_ - 2;
 			changed = true;
 		} else if (gain_ < gainMax_) {

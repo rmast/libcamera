@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include <algorithm>
+
 namespace libcamera {
 
 constexpr unsigned int kAtomispHwRevisionMask = 0x0000ff00;
@@ -15,6 +17,16 @@ constexpr bool atomispAeCadenceFrame(unsigned int frame, unsigned int interval)
 constexpr bool atomispSupportsSoftwareAe(unsigned int hwRevision)
 {
 	return (hwRevision & kAtomispHwRevisionMask) == kAtomispHwRevisionIsp2401;
+}
+
+constexpr int atomispNextVblank(int height, int vblank, double factor,
+				int maximum)
+{
+	int frameLength = height + vblank;
+	int nextFrameLength = static_cast<int>(frameLength * factor);
+
+	return std::clamp(std::max(nextFrameLength - height, vblank + 1),
+			  vblank, maximum);
 }
 
 } /* namespace libcamera */

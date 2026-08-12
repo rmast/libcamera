@@ -29,6 +29,12 @@ protected:
 			return TestFail;
 		}
 
+		if (atomispNextVblank(976, 21, 1.2, 43889) != 220 ||
+		    atomispNextVblank(976, 43889, 1.2, 43889) != 43889) {
+			std::cerr << "Unexpected AtomISP frame-length step" << std::endl;
+			return TestFail;
+		}
+
 		return TestPass;
 	}
 };
