@@ -196,6 +196,11 @@ void V4L2CameraProxy::setFmtFromConfig(const StreamConfiguration &streamConfig)
 
 	sizeimage_ = streamConfig.frameSize;
 
+	LOG(V4L2Compat, Info)
+		<< "V4L2 proxy layout: format=" << streamConfig.pixelFormat
+		<< " size=" << size << " bytesperline=" << v4l2PixFormat_.bytesperline
+		<< " sizeimage=" << v4l2PixFormat_.sizeimage;
+
 	const ControlInfoMap &controls = vcam_->controlInfo();
 	const auto &it = controls.find(&controls::FrameDurationLimits);
 

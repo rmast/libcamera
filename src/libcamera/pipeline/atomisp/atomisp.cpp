@@ -2142,6 +2142,11 @@ int AtomispPipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 			}
 			cfg.stride = captureFormat.planes[0].bpl;
 			cfg.frameSize = captureFormat.planes[0].size;
+			LOG(AtomispPipeline, Info)
+				<< "AtomISP stream layout: format=" << cfg.pixelFormat
+				<< " size=" << cfg.size << " stride=" << cfg.stride
+				<< " frameSize=" << cfg.frameSize
+				<< " packedStride=" << cfg.size.width * 2;
 		}
 
 		if (data->useConversion_ && !rawStream)
