@@ -723,6 +723,7 @@ public:
 	std::shared_ptr<MediaDevice> converter() { return converter_; }
 	bool swIspEnabled() const { return swIspEnabled_; }
 	bool atomispQuirks() const { return atomispQuirks_; }
+	bool softwareAeEnabled() const { return softwareAeEnabled_; }
 
 protected:
 	int queueRequestDevice(Camera *camera, Request *request) override;
@@ -757,6 +758,7 @@ private:
 	std::shared_ptr<MediaDevice> converter_;
 	bool swIspEnabled_;
 	bool atomispQuirks_;
+	bool softwareAeEnabled_;
 };
 
 /* -----------------------------------------------------------------------------
@@ -1836,7 +1838,8 @@ AtomispPipelineHandler::AtomispPipelineHandler(CameraManager *manager)
 	: PipelineHandler(manager, kMaxQueuedRequestsDevice),
 	  converter_(nullptr),
 	  swIspEnabled_(false),
-	  atomispQuirks_(true)
+	  atomispQuirks_(true),
+	  softwareAeEnabled_(false)
 {
 }
 
@@ -2090,7 +2093,7 @@ int AtomispPipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 	}
 
 	/* Configure the AtomISP luminance AE loop when applicable */
-	if (atomispQuirks_) {
+	if (atomispQuirks_ && softwareAeEnabled_) {
 		PixelFormat capturePf = captureFormat.fourcc.toPixelFormat();
 		data->atomispAe_ = std::make_unique<AtomispAeLoop>();
 		if (!data->atomispAe_->configure(data->sensor_.get(),
@@ -2177,7 +2180,7 @@ int AtomispPipelineHandler::start(Camera *camera, [[maybe_unused]] const Control
 
 	video->bufferReady.connect(data, &AtomispCameraData::imageBufferReady);
 
-	/* Keep sensor firmware AE disabled: AtomISP AE loop drives exposure/gain. */
+	/* Select the AE owner before streaming starts. */
 	for (const AtomispCameraData::Entity &entity : data->entities_) {
 		V4L2Subdevice *sd = pipe->subdev(entity.entity);
 		if (!sd)
@@ -2189,15 +2192,17 @@ int AtomispPipelineHandler::start(Camera *camera, [[maybe_unused]] const Control
 			continue;
 
 		ControlList ifpCtrls(ctrls);
-		ifpCtrls.set(V4L2_CID_EXPOSURE_AUTO, V4L2_EXPOSURE_MANUAL);
+		int32_t exposureMode = softwareAeEnabled_
+			? V4L2_EXPOSURE_MANUAL : V4L2_EXPOSURE_AUTO;
+		ifpCtrls.set(V4L2_CID_EXPOSURE_AUTO, exposureMode);
 		ret = sd->setControls(&ifpCtrls);
 		if (ret)
 			LOG(AtomispPipeline, Warning)
-				<< "Failed to set exposure_auto=MANUAL on "
+				<< "Failed to set exposure mode " << exposureMode << " on "
 				<< sd->entity()->name() << ": " << ret;
 		else
 			LOG(AtomispPipeline, Debug)
-				<< "Set exposure_auto=MANUAL on "
+				<< "Set exposure mode " << exposureMode << " on "
 				<< sd->entity()->name();
 		break;
 	}
@@ -2426,6 +2431,11 @@ bool AtomispPipelineHandler::matchDevice(std::shared_ptr<MediaDevice> media,
 
 	swIspEnabled_ = false; /* AtomISP always outputs YUV; no software debayering */
 	atomispQuirks_ = true;
+	softwareAeEnabled_ = atomispSupportsSoftwareAe(media->hwRevision());
+	LOG(AtomispPipeline, Info)
+		<< "AtomISP hardware revision " << utils::hex(media->hwRevision())
+		<< (softwareAeEnabled_ ? ": software AE enabled"
+				       : ": using sensor firmware AE");
 	const GlobalConfiguration &configuration = cameraManager()->_d()->configuration();
 	for (const ValueNode &entry :
 	     configuration.configuration()["pipelines"]["atomisp"]["supported_devices"]

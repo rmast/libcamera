@@ -22,6 +22,13 @@ protected:
 			}
 		}
 
+		if (atomispSupportsSoftwareAe(0x1010) ||
+		    !atomispSupportsSoftwareAe(0x2000) ||
+		    !atomispSupportsSoftwareAe(0x2010)) {
+			std::cerr << "Unexpected AtomISP AE capability" << std::endl;
+			return TestFail;
+		}
+
 		return TestPass;
 	}
 };
