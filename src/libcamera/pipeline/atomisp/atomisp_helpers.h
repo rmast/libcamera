@@ -29,4 +29,12 @@ constexpr int atomispNextVblank(int height, int vblank, double factor,
 			  vblank, maximum);
 }
 
+constexpr int atomispNextGain(int gain, double factor, int minimum,
+			     int maximum)
+{
+	int nextGain = static_cast<int>(gain * factor);
+
+	return std::clamp(std::max(nextGain, gain + 1), minimum, maximum);
+}
+
 } /* namespace libcamera */

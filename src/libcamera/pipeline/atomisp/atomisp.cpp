@@ -316,6 +316,7 @@ private:
 	static constexpr double kPGainLowLight = 0.08;
 	static constexpr double kMaxStepLowLight = 0.25;
 	static constexpr double kLowLightMsv = 1.2;
+	static constexpr int32_t kLowLightGainFloor = 128;
 	/* MT9M114 CAM_SENSOR_CFG_FRAME_LENGTH_LINES_MAX */
 	static constexpr int32_t kFllMax = 65535;
 	/* Limit vblank to this multiple of normal FLL (30 -> allow down to ~1fps). */
@@ -512,20 +513,24 @@ void AtomispAeLoop::updateExposure(double msv)
 	bool changed = false;
 
 	if (factor > 1.0) {
-		/* Too dark: raise exposure → extend vblank → raise gain */
+		/* Too dark: raise normal-frame exposure, then gain, then frame time. */
 		if (exposure_ < exposureMax_) {
 			int32_t next = static_cast<int32_t>(exposure_ * factor);
 			exposure_ = std::clamp(std::max(next, exposure_ + 1),
 					       exposureMin_, exposureMax_);
+			changed = true;
+		} else if (gain_ < gainMax_) {
+			const int32_t gainFloor = msv < kLowLightMsv
+				? std::min(kLowLightGainFloor, static_cast<int32_t>(gainMax_))
+				: gainMin_;
+			gain_ = atomispNextGain(static_cast<int32_t>(gain_), factor,
+						  gainFloor, gainMax_);
 			changed = true;
 		} else if (height_ > 0 && vblank_ < vblankPracticalMax_) {
 			/* Extend frame time before raising exposure on the next cycle. */
 			vblank_ = atomispNextVblank(height_, vblank_, factor,
 						  vblankPracticalMax_);
 			exposureMax_ = height_ + vblank_ - 2;
-			changed = true;
-		} else if (gain_ < gainMax_) {
-			gain_ = std::min(gain_ * factor, gainMax_);
 			changed = true;
 		}
 	} else {
