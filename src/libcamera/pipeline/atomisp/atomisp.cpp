@@ -501,10 +501,10 @@ void AtomispAeLoop::updateExposure(double msv)
 	double maxStep = kMaxStep;
 
 	/*
-	 * In very dark scenes the gain is often already saturated. Accelerate
-	 * exposure/vblank growth so convergence doesn't take minutes.
+	 * Accelerate frame-length growth when normal-frame exposure is exhausted
+	 * and the scene remains severely underexposed.
 	 */
-	if (gain_ >= gainMax_ && msv < kLowLightMsv) {
+	if (exposure_ >= exposureMax_ && msv < kLowLightMsv) {
 		pGain = kPGainLowLight;
 		maxStep = kMaxStepLowLight;
 	}
@@ -514,20 +514,20 @@ void AtomispAeLoop::updateExposure(double msv)
 	bool changed = false;
 
 	if (factor > 1.0) {
-		/* Too dark: raise exposure → raise gain → extend vblank (last resort) */
+		/* Too dark: raise exposure → extend vblank → raise gain */
 		if (exposure_ < exposureMax_) {
 			int32_t next = static_cast<int32_t>(exposure_ * factor);
 			exposure_ = std::clamp(std::max(next, exposure_ + 1),
 					       exposureMin_, exposureMax_);
-			changed = true;
-		} else if (gain_ < gainMax_) {
-			gain_ = std::min(gain_ * factor, gainMax_);
 			changed = true;
 		} else if (height_ > 0 && vblank_ < vblankPracticalMax_) {
 			/* Extend frame time before raising exposure on the next cycle. */
 			int32_t next = static_cast<int32_t>(vblank_ * factor);
 			vblank_ = std::min(std::max(next, vblank_ + 1), vblankPracticalMax_);
 			exposureMax_ = height_ + vblank_ - 2;
+			changed = true;
+		} else if (gain_ < gainMax_) {
+			gain_ = std::min(gain_ * factor, gainMax_);
 			changed = true;
 		}
 	} else {
