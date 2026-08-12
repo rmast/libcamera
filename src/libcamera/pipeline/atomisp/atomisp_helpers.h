@@ -6,7 +6,7 @@ namespace libcamera {
 
 constexpr bool atomispAeCadenceFrame(unsigned int frame, unsigned int interval)
 {
-	return frame % interval == 0;
+	return (frame + 1) % interval == 0;
 }
 
 } /* namespace libcamera */

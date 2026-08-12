@@ -375,7 +375,11 @@ bool AtomispAeLoop::configure(CameraSensor *sensor,
 	std::array<uint32_t, 2> hwIds = { V4L2_CID_EXPOSURE, V4L2_CID_ANALOGUE_GAIN };
 	ControlList hwCtrls = sensor->getControls(hwIds);
 	if (!hwCtrls.empty()) {
-		exposure_ = std::clamp(hwCtrls.get(V4L2_CID_EXPOSURE).get<int32_t>(),
+		const int32_t bootstrapExposure = exposureMin_ +
+			(exposureMax_ - exposureMin_) / 2;
+		exposure_ = std::clamp(std::max(
+				   hwCtrls.get(V4L2_CID_EXPOSURE).get<int32_t>(),
+				   bootstrapExposure),
 				   exposureMin_, exposureMax_);
 		gain_ = std::clamp(static_cast<double>(
 				   hwCtrls.get(V4L2_CID_ANALOGUE_GAIN).get<int32_t>()),
@@ -484,6 +488,9 @@ void AtomispAeLoop::updateExposure(double msv)
 {
 	/* Track manual writes so AE can continue from the real hardware state. */
 	syncFromHardware();
+	const int32_t previousExposure = exposure_;
+	const int32_t previousGain = static_cast<int32_t>(gain_);
+	const int32_t previousVblank = vblank_;
 
 	double error = kOptimalMsv - msv;
 
@@ -547,11 +554,14 @@ void AtomispAeLoop::updateExposure(double msv)
 		return;
 
 	ControlList sensorCtrls(sensor_->controls());
-	sensorCtrls.set(V4L2_CID_EXPOSURE, exposure_);
-	sensorCtrls.set(V4L2_CID_ANALOGUE_GAIN, static_cast<int32_t>(gain_));
-	if (height_ > 0)
+	if (exposure_ != previousExposure)
+		sensorCtrls.set(V4L2_CID_EXPOSURE, exposure_);
+	if (static_cast<int32_t>(gain_) != previousGain)
+		sensorCtrls.set(V4L2_CID_ANALOGUE_GAIN, static_cast<int32_t>(gain_));
+	if (height_ > 0 && vblank_ != previousVblank)
 		sensorCtrls.set(V4L2_CID_VBLANK, vblank_);
-	setSensorControls.emit(sensorCtrls);
+	if (!sensorCtrls.empty())
+		setSensorControls.emit(sensorCtrls);
 
 	LOG(AtomispPipeline, Debug)
 		<< "AtomISP AE update: msv=" << msv
