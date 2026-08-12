@@ -524,11 +524,10 @@ void AtomispAeLoop::updateExposure(double msv)
 			gain_ = std::min(gain_ * factor, gainMax_);
 			changed = true;
 		} else if (height_ > 0 && vblank_ < vblankPracticalMax_) {
-			/* Extend frame time, keeping fps ≥ 1/kMaxVblankFactor of normal. */
+			/* Extend frame time before raising exposure on the next cycle. */
 			int32_t next = static_cast<int32_t>(vblank_ * factor);
 			vblank_ = std::min(std::max(next, vblank_ + 1), vblankPracticalMax_);
 			exposureMax_ = height_ + vblank_ - 2;
-			exposure_ = exposureMax_;
 			changed = true;
 		}
 	} else {
