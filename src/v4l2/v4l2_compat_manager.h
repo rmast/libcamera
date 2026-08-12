@@ -56,7 +56,7 @@ private:
 	~V4L2CompatManager();
 
 	int start();
-	int getCameraIndex(int fd);
+	int getCameraIndex(dev_t devnum);
 	std::shared_ptr<V4L2CameraFile> cameraFile(int fd);
 
 	FileOperations fops_;

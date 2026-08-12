@@ -100,15 +100,8 @@ std::shared_ptr<V4L2CameraFile> V4L2CompatManager::cameraFile(int fd)
 	return file->second;
 }
 
-int V4L2CompatManager::getCameraIndex(int fd)
+int V4L2CompatManager::getCameraIndex(dev_t devnum)
 {
-	struct stat statbuf;
-	int ret = fstat(fd, &statbuf);
-	if (ret < 0)
-		return -1;
-
-	const dev_t devnum = statbuf.st_rdev;
-
 	/*
 	 * Iterate each known camera and identify if it reports this nodes
 	 * device number in its list of SystemDevices.
@@ -143,26 +136,23 @@ int V4L2CompatManager::getCameraIndex(int fd)
 
 int V4L2CompatManager::openat(int dirfd, const char *path, int oflag, mode_t mode)
 {
-	int fd = fops_.openat(dirfd, path, oflag, mode);
-	if (fd < 0)
-		return fd;
-
 	struct stat statbuf;
-	int ret = fstat(fd, &statbuf);
-	if (ret < 0 || (statbuf.st_mode & S_IFMT) != S_IFCHR ||
-	    major(statbuf.st_rdev) != 81)
-		return fd;
+	int ret = fstatat(dirfd, path, &statbuf, 0);
+	bool videoDevice = ret == 0 &&
+		(statbuf.st_mode & S_IFMT) == S_IFCHR &&
+		major(statbuf.st_rdev) == 81;
 
-	if (!cm_)
-		start();
+	if (!videoDevice)
+		return fops_.openat(dirfd, path, oflag, mode);
 
-	ret = getCameraIndex(fd);
+	if (!cm_ && start())
+		return fops_.openat(dirfd, path, oflag, mode);
+
+	ret = getCameraIndex(statbuf.st_rdev);
 	if (ret < 0) {
 		LOG(V4L2Compat, Debug) << "No camera found for " << path;
-		return fd;
+		return fops_.openat(dirfd, path, oflag, mode);
 	}
-
-	fops_.close(fd);
 
 	int efd = eventfd(0, EFD_SEMAPHORE |
 			     ((oflag & O_CLOEXEC) ? EFD_CLOEXEC : 0) |
