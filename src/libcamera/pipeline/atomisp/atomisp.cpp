@@ -1114,36 +1114,17 @@ void AtomispCameraData::tryPipeline(unsigned int code, const Size &size)
 	};
 
 	if (pipe()->atomispQuirks()) {
-		static const std::array<uint32_t, 9> preferredFormats = {
+		static const std::array<uint32_t, 2> supportedFormats = {
 			V4L2_PIX_FMT_UYVY,
 			V4L2_PIX_FMT_YUYV,
-			V4L2_PIX_FMT_NV12,
-			V4L2_PIX_FMT_NV21,
-			V4L2_PIX_FMT_YUV420,
-			V4L2_PIX_FMT_YVU420,
-			V4L2_PIX_FMT_YUV422P,
-			V4L2_PIX_FMT_YUV444,
-			V4L2_PIX_FMT_NV16,
 		};
 
-		std::vector<V4L2PixelFormat> seenFormats;
-		seenFormats.reserve(videoFormats.size());
-
-		for (uint32_t preferredFormat : preferredFormats) {
-			auto it = videoFormats.find(V4L2PixelFormat(preferredFormat));
+		for (uint32_t supportedFormat : supportedFormats) {
+			auto it = videoFormats.find(V4L2PixelFormat(supportedFormat));
 			if (it == videoFormats.end())
 				continue;
 
 			addConfigurations(*it);
-			seenFormats.push_back(V4L2PixelFormat(preferredFormat));
-		}
-
-		for (const auto &videoFormat : videoFormats) {
-			if (std::find(seenFormats.begin(), seenFormats.end(), videoFormat.first) !=
-			    seenFormats.end())
-				continue;
-
-			addConfigurations(videoFormat);
 		}
 	} else {
 		for (const auto &videoFormat : videoFormats)
