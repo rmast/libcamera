@@ -181,10 +181,11 @@ bool V4L2CameraProxy::validateMemoryType(uint32_t memory)
 void V4L2CameraProxy::setFmtFromConfig(const StreamConfiguration &streamConfig)
 {
 	const Size &size = streamConfig.size;
+	const PixelFormat &format = streamConfig.pixelFormat;
 
 	v4l2PixFormat_.width        = size.width;
 	v4l2PixFormat_.height       = size.height;
-	v4l2PixFormat_.pixelformat  = V4L2PixelFormat::fromPixelFormat(streamConfig.pixelFormat)[0];
+	v4l2PixFormat_.pixelformat  = V4L2PixelFormat::fromPixelFormat(format)[0];
 	v4l2PixFormat_.field        = V4L2_FIELD_NONE;
 	v4l2PixFormat_.bytesperline = streamConfig.stride;
 	v4l2PixFormat_.sizeimage    = streamConfig.frameSize;
@@ -194,11 +195,17 @@ void V4L2CameraProxy::setFmtFromConfig(const StreamConfiguration &streamConfig)
 	v4l2PixFormat_.quantization = V4L2_QUANTIZATION_DEFAULT;
 	v4l2PixFormat_.xfer_func    = V4L2_XFER_FUNC_DEFAULT;
 
+	if ((format == formats::UYVY || format == formats::YUYV) &&
+	    streamConfig.stride > size.width * 2)
+		v4l2PixFormat_.width = streamConfig.stride / 2;
+
 	sizeimage_ = streamConfig.frameSize;
 
 	LOG(V4L2Compat, Info)
 		<< "V4L2 proxy layout: format=" << streamConfig.pixelFormat
-		<< " size=" << size << " bytesperline=" << v4l2PixFormat_.bytesperline
+		<< " activeSize=" << size << " exposedSize="
+		<< v4l2PixFormat_.width << "x" << v4l2PixFormat_.height
+		<< " bytesperline=" << v4l2PixFormat_.bytesperline
 		<< " sizeimage=" << v4l2PixFormat_.sizeimage;
 
 	const ControlInfoMap &controls = vcam_->controlInfo();
@@ -403,6 +410,7 @@ int V4L2CameraProxy::vidioc_s_fmt(V4L2CameraFile *file, struct v4l2_format *arg)
 		return -EINVAL;
 
 	setFmtFromConfig(streamConfig_);
+	arg->fmt.pix = v4l2PixFormat_;
 
 	return 0;
 }
