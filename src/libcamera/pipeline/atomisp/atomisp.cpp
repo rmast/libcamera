@@ -311,10 +311,13 @@ private:
 	static constexpr double kSatisfactory = 0.3;
 	static constexpr double kPGain = 0.02;
 	static constexpr double kMaxStep = 0.10;
+	static constexpr double kPGainLowLight = 0.08;
+	static constexpr double kMaxStepLowLight = 0.25;
+	static constexpr double kLowLightMsv = 1.2;
 	/* MT9M114 CAM_SENSOR_CFG_FRAME_LENGTH_LINES_MAX */
 	static constexpr int32_t kFllMax = 65535;
 	/* Limit vblank to this multiple of normal FLL (30 -> allow down to ~1fps). */
-	static constexpr int32_t kMaxVblankFactor = 30;
+	static constexpr int32_t kMaxVblankFactor = 45;
 
 	bool warnedUnsupportedFormat_ = false;
 	unsigned int sampleCount_ = 0;
@@ -514,7 +517,19 @@ void AtomispAeLoop::updateExposure(double msv)
 	if (std::abs(error) <= kSatisfactory)
 		return;
 
-	double step = std::clamp(error * kPGain, -kMaxStep, kMaxStep);
+	double pGain = kPGain;
+	double maxStep = kMaxStep;
+
+	/*
+	 * In very dark scenes the gain is often already saturated. Accelerate
+	 * exposure/vblank growth so convergence doesn't take minutes.
+	 */
+	if (gain_ >= gainMax_ && msv < kLowLightMsv) {
+		pGain = kPGainLowLight;
+		maxStep = kMaxStepLowLight;
+	}
+
+	double step = std::clamp(error * pGain, -maxStep, maxStep);
 	double factor = 1.0 + step;
 	bool changed = false;
 
