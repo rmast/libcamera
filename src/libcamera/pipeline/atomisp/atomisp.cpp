@@ -515,9 +515,8 @@ void AtomispAeLoop::updateExposure(double msv)
 	if (factor > 1.0) {
 		/* Too dark: raise normal-frame exposure, then gain, then frame time. */
 		if (exposure_ < exposureMax_) {
-			int32_t next = static_cast<int32_t>(exposure_ * factor);
-			exposure_ = std::clamp(std::max(next, exposure_ + 1),
-					       exposureMin_, exposureMax_);
+			exposure_ = atomispNextExposure(exposure_, exposureMin_, exposureMax_,
+							msv, kLowLightMsv, factor);
 			changed = true;
 		} else if (gain_ < gainMax_) {
 			const int32_t gainFloor = msv < kLowLightMsv

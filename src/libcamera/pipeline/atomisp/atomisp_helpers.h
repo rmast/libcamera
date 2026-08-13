@@ -29,6 +29,18 @@ constexpr int atomispNextVblank(int height, int vblank, double factor,
 			  vblank, maximum);
 }
 
+constexpr int atomispNextExposure(int exposure, int minimum, int maximum,
+				  double measuredMsv, double lowLightMsv,
+				  double factor)
+{
+	if (measuredMsv < lowLightMsv)
+		return maximum;
+
+	int nextExposure = static_cast<int>(exposure * factor);
+
+	return std::clamp(std::max(nextExposure, exposure + 1), minimum, maximum);
+}
+
 constexpr int atomispTargetGain(int gain, double measuredMsv,
 				double targetMsv, int maximum)
 {

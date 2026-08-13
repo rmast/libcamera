@@ -35,6 +35,12 @@ protected:
 			return TestFail;
 		}
 
+		if (atomispNextExposure(497, 1, 995, 0.02, 1.2, 1.05) != 995 ||
+		    atomispNextExposure(497, 1, 995, 1.5, 1.2, 1.05) != 521) {
+			std::cerr << "Unexpected AtomISP exposure step" << std::endl;
+			return TestFail;
+		}
+
 		if (atomispTargetGain(32, 0.45, 2.5, 511) != 177 ||
 		    atomispTargetGain(177, 1.65, 2.5, 511) != 268 ||
 		    atomispTargetGain(177, 0.0, 2.5, 511) != 511) {
