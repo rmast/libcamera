@@ -22,6 +22,12 @@ protected:
 			}
 		}
 
+		if (atomispAeCadenceInterval(15, 997, 997) != 15 ||
+		    atomispAeCadenceInterval(15, 997, 8000) != 1) {
+			std::cerr << "Unexpected AtomISP cadence interval" << std::endl;
+			return TestFail;
+		}
+
 		if (atomispSupportsSoftwareAe(0x1010) ||
 		    !atomispSupportsSoftwareAe(0x2000) ||
 		    !atomispSupportsSoftwareAe(0x2010)) {
@@ -32,6 +38,12 @@ protected:
 		if (atomispNextVblank(976, 21, 1.2, 43889) != 220 ||
 		    atomispNextVblank(976, 43889, 1.2, 43889) != 43889) {
 			std::cerr << "Unexpected AtomISP frame-length step" << std::endl;
+			return TestFail;
+		}
+
+		if (atomispTargetVblank(976, 21, 0.15, 1.2, 43889) != 6999 ||
+		    atomispTargetVblank(976, 21, 0.0, 1.2, 43889) != 43889) {
+			std::cerr << "Unexpected AtomISP target frame length" << std::endl;
 			return TestFail;
 		}
 

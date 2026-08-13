@@ -415,7 +415,11 @@ void AtomispAeLoop::bootstrap()
 
 void AtomispAeLoop::processBuffer(FrameBuffer *buffer)
 {
-	if (!atomispAeCadenceFrame(frameCount_++, kInterval))
+	const unsigned int normalFrameLength = height_ + vblankMin_;
+	const unsigned int frameLength = height_ + vblank_;
+	const unsigned int interval = atomispAeCadenceInterval(
+		kInterval, normalFrameLength, frameLength);
+	if (!atomispAeCadenceFrame(frameCount_++, interval))
 		return;
 
 	const bool isUyvy = format_ == formats::UYVY;
@@ -528,8 +532,11 @@ void AtomispAeLoop::updateExposure(double msv)
 			changed = true;
 		} else if (height_ > 0 && vblank_ < vblankPracticalMax_) {
 			/* Extend frame time before raising exposure on the next cycle. */
-			vblank_ = atomispNextVblank(height_, vblank_, factor,
-						  vblankPracticalMax_);
+			vblank_ = msv < kLowLightMsv
+				? atomispTargetVblank(height_, vblank_, msv, kLowLightMsv,
+						       vblankPracticalMax_)
+				: atomispNextVblank(height_, vblank_, factor,
+						     vblankPracticalMax_);
 			exposureMax_ = height_ + vblank_ - 2;
 			changed = true;
 		}

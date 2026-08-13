@@ -14,6 +14,16 @@ constexpr bool atomispAeCadenceFrame(unsigned int frame, unsigned int interval)
 	return (frame + 1) % interval == 0;
 }
 
+constexpr unsigned int atomispAeCadenceInterval(unsigned int interval,
+					 unsigned int normalFrameLength,
+					 unsigned int frameLength)
+{
+	if (!normalFrameLength || !frameLength)
+		return interval;
+
+	return std::max(1U, interval * normalFrameLength / frameLength);
+}
+
 constexpr bool atomispSupportsSoftwareAe(unsigned int hwRevision)
 {
 	return (hwRevision & kAtomispHwRevisionMask) == kAtomispHwRevisionIsp2401;
@@ -26,6 +36,20 @@ constexpr int atomispNextVblank(int height, int vblank, double factor,
 	int nextFrameLength = static_cast<int>(frameLength * factor);
 
 	return std::clamp(std::max(nextFrameLength - height, vblank + 1),
+			  vblank, maximum);
+}
+
+constexpr int atomispTargetVblank(int height, int vblank,
+				  double measuredMsv, double targetMsv,
+				  int maximum)
+{
+	if (measuredMsv <= 0.0)
+		return maximum;
+
+	int frameLength = height + vblank;
+	int targetFrameLength = static_cast<int>(frameLength * targetMsv / measuredMsv);
+
+	return std::clamp(std::max(targetFrameLength - height, vblank + 1),
 			  vblank, maximum);
 }
 
