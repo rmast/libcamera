@@ -42,6 +42,7 @@ protected:
 		}
 
 		if (atomispTargetVblank(976, 21, 0.15, 1.2, 43889) != 6999 ||
+		    atomispTargetVblank(976, 21, 0.5, 2.5, 43889) != 4009 ||
 		    atomispTargetVblank(976, 21, 0.0, 1.2, 43889) != 43889) {
 			std::cerr << "Unexpected AtomISP target frame length" << std::endl;
 			return TestFail;

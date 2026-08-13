@@ -532,8 +532,8 @@ void AtomispAeLoop::updateExposure(double msv)
 			changed = true;
 		} else if (height_ > 0 && vblank_ < vblankPracticalMax_) {
 			/* Extend frame time before raising exposure on the next cycle. */
-			vblank_ = msv < kLowLightMsv
-				? atomispTargetVblank(height_, vblank_, msv, kLowLightMsv,
+			vblank_ = msv < kOptimalMsv - kSatisfactory
+				? atomispTargetVblank(height_, vblank_, msv, kOptimalMsv,
 						       vblankPracticalMax_)
 				: atomispNextVblank(height_, vblank_, factor,
 						     vblankPracticalMax_);
