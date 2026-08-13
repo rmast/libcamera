@@ -523,8 +523,9 @@ void AtomispAeLoop::updateExposure(double msv)
 			const int32_t gainFloor = msv < kLowLightMsv
 				? std::min(kLowLightGainFloor, static_cast<int32_t>(gainMax_))
 				: gainMin_;
-			gain_ = atomispNextGain(static_cast<int32_t>(gain_), factor,
-						  gainFloor, gainMax_);
+			const int32_t targetGain = atomispTargetGain(
+				static_cast<int32_t>(gain_), msv, kOptimalMsv, gainMax_);
+			gain_ = std::max(gainFloor, targetGain);
 			changed = true;
 		} else if (height_ > 0 && vblank_ < vblankPracticalMax_) {
 			/* Extend frame time before raising exposure on the next cycle. */

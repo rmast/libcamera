@@ -35,10 +35,10 @@ protected:
 			return TestFail;
 		}
 
-		if (atomispNextGain(32, 1.25, 128, 511) != 128 ||
-		    atomispNextGain(128, 1.25, 128, 511) != 160 ||
-		    atomispNextGain(500, 1.25, 128, 511) != 511) {
-			std::cerr << "Unexpected AtomISP gain step" << std::endl;
+		if (atomispTargetGain(32, 0.45, 2.5, 511) != 177 ||
+		    atomispTargetGain(177, 1.65, 2.5, 511) != 268 ||
+		    atomispTargetGain(177, 0.0, 2.5, 511) != 511) {
+			std::cerr << "Unexpected AtomISP target gain" << std::endl;
 			return TestFail;
 		}
 
