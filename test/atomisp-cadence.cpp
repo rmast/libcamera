@@ -47,6 +47,12 @@ protected:
 			return TestFail;
 		}
 
+		if (atomispTargetVblankDown(976, 43889, 5.0, 2.5, 21) != 21456 ||
+		    atomispTargetVblankDown(976, 50, 2.5, 2.5, 21) != 49) {
+			std::cerr << "Unexpected AtomISP bright frame length" << std::endl;
+			return TestFail;
+		}
+
 		if (atomispNextExposure(497, 1, 995, 0.02, 1.2, 1.05) != 995 ||
 		    atomispNextExposure(497, 1, 995, 1.5, 1.2, 1.05) != 521) {
 			std::cerr << "Unexpected AtomISP exposure step" << std::endl;

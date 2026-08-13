@@ -53,6 +53,17 @@ constexpr int atomispTargetVblank(int height, int vblank,
 			  vblank, maximum);
 }
 
+constexpr int atomispTargetVblankDown(int height, int vblank,
+				      double measuredMsv, double targetMsv,
+				      int minimum)
+{
+	int frameLength = height + vblank;
+	int targetFrameLength = static_cast<int>(frameLength * targetMsv / measuredMsv);
+
+	return std::clamp(std::min(targetFrameLength - height, vblank - 1),
+			  minimum, vblank);
+}
+
 constexpr int atomispNextExposure(int exposure, int minimum, int maximum,
 				  double measuredMsv, double lowLightMsv,
 				  double factor)

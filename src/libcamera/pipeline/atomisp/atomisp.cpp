@@ -543,8 +543,8 @@ void AtomispAeLoop::updateExposure(double msv)
 	} else {
 		/* Too bright: restore fps first, then gain, then exposure */
 		if (height_ > 0 && vblank_ > vblankMin_) {
-			int32_t next = static_cast<int32_t>(vblank_ * factor);
-			vblank_ = std::max(std::min(next, vblank_ - 1), vblankMin_);
+			vblank_ = atomispTargetVblankDown(height_, vblank_, msv,
+						  kOptimalMsv, vblankMin_);
 			exposureMax_ = height_ + vblank_ - 2;
 			exposure_ = std::min(exposure_, exposureMax_);
 			changed = true;
