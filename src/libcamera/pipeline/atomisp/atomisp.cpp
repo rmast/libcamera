@@ -615,7 +615,7 @@ public:
 	V4L2Subdevice *subdev(const MediaEntity *entity);
 	std::shared_ptr<MediaDevice> converter() { return converter_; }
 	bool swIspEnabled() const { return swIspEnabled_; }
-	bool atomispQuirks() const { return atomispQuirks_; }
+	bool atomispQuirks() const { return true; }
 	bool softwareAeEnabled() const { return softwareAeEnabled_; }
 
 protected:
@@ -650,7 +650,6 @@ private:
 
 	std::shared_ptr<MediaDevice> converter_;
 	bool swIspEnabled_;
-	bool atomispQuirks_;
 	bool softwareAeEnabled_;
 };
 
@@ -884,7 +883,7 @@ void AtomispCameraData::tryPipeline(unsigned int code, const Size &size)
 	}
 
 	V4L2VideoDevice::Formats videoFormats = video_->formats(format.code);
-	if (videoFormats.empty() && pipe()->atomispQuirks() &&
+	if (videoFormats.empty() &&
 	    !video_->caps().hasMediaController()) {
 		LOG(AtomispPipeline, Warning)
 			<< "Video node " << video_->deviceNode()
@@ -911,9 +910,7 @@ void AtomispCameraData::tryPipeline(unsigned int code, const Size &size)
 			return;
 		}
 
-		std::vector<Size> captureSizes = {
-			pipe()->atomispQuirks() ? size : format.size,
-		};
+		std::vector<Size> captureSizes = { size };
 
 		for (const Size &captureSize : captureSizes) {
 			Size actualCaptureSize = captureSize;
@@ -921,7 +918,7 @@ void AtomispCameraData::tryPipeline(unsigned int code, const Size &size)
 				 * Binning mode (~648x488) must be skipped due to DVS
 				 * padding mismatch; only full-res (~1296x976) is usable.
 				 */
-				if (pipe()->atomispQuirks() && captureSize.width < 1000) {
+				if (captureSize.width < 1000) {
 					LOG(AtomispPipeline, Debug)
 						<< "Skipping AtomISP binning-mode config for "
 						<< captureSize << "-" << videoFormat.first
@@ -929,7 +926,7 @@ void AtomispCameraData::tryPipeline(unsigned int code, const Size &size)
 					continue;
 				}
 
-				if (pipe()->atomispQuirks()) {
+				{
 					V4L2DeviceFormat captureFormat;
 					captureFormat.fourcc = videoFormat.first;
 					captureFormat.size = captureSize;
@@ -1731,7 +1728,6 @@ AtomispPipelineHandler::AtomispPipelineHandler(CameraManager *manager)
 	: PipelineHandler(manager, kMaxQueuedRequestsDevice),
 	  converter_(nullptr),
 	  swIspEnabled_(false),
-	  atomispQuirks_(true),
 	  softwareAeEnabled_(false)
 {
 }
@@ -1841,7 +1837,7 @@ AtomispPipelineHandler::generateConfiguration(Camera *camera, Span<const StreamR
 		 * PipeWire SPA plugin uses the correct value during format
 		 * negotiation (before configure() can update it).
 		 */
-		if (atomispQuirks_ && role != StreamRole::Raw) {
+			if (atomispQuirks() && role != StreamRole::Raw) {
 			const PixelFormatInfo &info = PixelFormatInfo::info(cfg.pixelFormat);
 			if (info.isValid()) {
 				cfg.stride = ((info.stride(cfg.size.width, 0, 1) + 63) / 64) * 64;
@@ -1986,7 +1982,7 @@ int AtomispPipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 	}
 
 	/* Configure the AtomISP luminance AE loop when applicable */
-	if (atomispQuirks_ && softwareAeEnabled_) {
+	if (atomispQuirks() && softwareAeEnabled_) {
 		PixelFormat capturePf = captureFormat.fourcc.toPixelFormat();
 		data->atomispAe_ = std::make_unique<AtomispAeLoop>();
 		if (!data->atomispAe_->configure(data->sensor_.get(),
@@ -2212,7 +2208,7 @@ AtomispPipelineHandler::locateSensors(MediaDevice *media)
 	if (entities.empty())
 		return {};
 
-	if (atomispQuirks_) {
+	if (atomispQuirks()) {
 		/*
 		 * Keep the real sensor entities (MEDIA_ENT_F_CAM_SENSOR) as camera
 		 * roots for AtomISP split sensor+ISP topologies. Mandatory controls
@@ -2323,7 +2319,6 @@ bool AtomispPipelineHandler::matchDevice(std::shared_ptr<MediaDevice> media,
 	}
 
 	swIspEnabled_ = false; /* AtomISP always outputs YUV; no software debayering */
-	atomispQuirks_ = true;
 	softwareAeEnabled_ = atomispSupportsSoftwareAe(media->hwRevision());
 	LOG(AtomispPipeline, Info)
 		<< "AtomISP hardware revision " << utils::hex(media->hwRevision())
