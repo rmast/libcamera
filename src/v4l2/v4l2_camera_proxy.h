@@ -94,6 +94,7 @@ private:
 	std::set<V4L2CameraFile *> files_;
 
 	std::unique_ptr<V4L2Camera> vcam_;
+	bool packedPaddingWidthQuirk_;
 
 	/*
 	 * This is the exclusive owner of this V4L2CameraProxy instance.

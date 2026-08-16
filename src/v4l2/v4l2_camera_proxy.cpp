@@ -40,10 +40,21 @@ using namespace std::literals::chrono_literals;
 
 LOG_DECLARE_CATEGORY(V4L2Compat)
 
+namespace {
+
+bool needsPackedPaddingWidthQuirk(const std::string &cameraId)
+{
+	return cameraId.find("mt9m114") != std::string::npos;
+}
+
+} /* namespace */
+
 V4L2CameraProxy::V4L2CameraProxy(unsigned int index,
 				 std::shared_ptr<Camera> camera)
 	: refcount_(0), index_(index), bufferCount_(0), currentBuf_(0),
-	  vcam_(std::make_unique<V4L2Camera>(camera)), owner_(nullptr)
+	  vcam_(std::make_unique<V4L2Camera>(camera)),
+	  packedPaddingWidthQuirk_(needsPackedPaddingWidthQuirk(camera->id())),
+	  owner_(nullptr)
 {
 	querycap(camera);
 }
@@ -198,6 +209,7 @@ void V4L2CameraProxy::setFmtFromConfig(const StreamConfiguration &streamConfig)
 
 	v4l2PixFormat_.width = v4l2CompatExposedWidth(
 		format == formats::UYVY || format == formats::YUYV,
+		packedPaddingWidthQuirk_,
 		size.width, streamConfig.stride);
 
 	sizeimage_ = streamConfig.frameSize;
@@ -207,7 +219,8 @@ void V4L2CameraProxy::setFmtFromConfig(const StreamConfiguration &streamConfig)
 		<< " activeSize=" << size << " exposedSize="
 		<< v4l2PixFormat_.width << "x" << v4l2PixFormat_.height
 		<< " bytesperline=" << v4l2PixFormat_.bytesperline
-		<< " sizeimage=" << v4l2PixFormat_.sizeimage;
+		<< " sizeimage=" << v4l2PixFormat_.sizeimage
+		<< " packedPaddingWidthQuirk=" << packedPaddingWidthQuirk_;
 
 	const ControlInfoMap &controls = vcam_->controlInfo();
 	const auto &it = controls.find(&controls::FrameDurationLimits);
