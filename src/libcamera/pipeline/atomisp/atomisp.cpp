@@ -615,7 +615,6 @@ public:
 	V4L2Subdevice *subdev(const MediaEntity *entity);
 	std::shared_ptr<MediaDevice> converter() { return converter_; }
 	bool swIspEnabled() const { return swIspEnabled_; }
-	bool atomispQuirks() const { return true; }
 	bool softwareAeEnabled() const { return softwareAeEnabled_; }
 
 protected:
@@ -981,22 +980,17 @@ void AtomispCameraData::tryPipeline(unsigned int code, const Size &size)
 		}
 	};
 
-	if (pipe()->atomispQuirks()) {
-		static const std::array<uint32_t, 2> supportedFormats = {
-			V4L2_PIX_FMT_UYVY,
-			V4L2_PIX_FMT_YUYV,
-		};
+	static const std::array<uint32_t, 2> supportedFormats = {
+		V4L2_PIX_FMT_UYVY,
+		V4L2_PIX_FMT_YUYV,
+	};
 
-		for (uint32_t supportedFormat : supportedFormats) {
-			auto it = videoFormats.find(V4L2PixelFormat(supportedFormat));
-			if (it == videoFormats.end())
-				continue;
+	for (uint32_t supportedFormat : supportedFormats) {
+		auto it = videoFormats.find(V4L2PixelFormat(supportedFormat));
+		if (it == videoFormats.end())
+			continue;
 
-			addConfigurations(*it);
-		}
-	} else {
-		for (const auto &videoFormat : videoFormats)
-			addConfigurations(videoFormat);
+		addConfigurations(*it);
 	}
 }
 
@@ -1098,8 +1092,7 @@ int AtomispCameraData::setupFormats(V4L2SubdeviceFormat *format,
 
 			if (format->code != sourceFormat.code ||
 			    format->size != sourceFormat.size) {
-					if (pipe->atomispQuirks() &&
-					    format->code == sourceFormat.code) {
+					if (format->code == sourceFormat.code) {
 						int dw = std::abs(static_cast<int>(format->size.width) -
 								  static_cast<int>(sourceFormat.size.width));
 						int dh = std::abs(static_cast<int>(format->size.height) -
@@ -1418,25 +1411,14 @@ CameraConfiguration::Status AtomispCameraConfiguration::validate()
 		return Invalid;
 
 	Orientation requestedOrientation = orientation;
-	if (data_->pipe()->atomispQuirks()) {
-		/*
-		 * Use the sensor's native transform so firmware-programmed flips
-		 * (e.g. 180° mounted sensors) are honoured. Guard against
-		 * axis-transposing transforms (90°/270°) that would swap the
-		 * landscape sensor into a portrait capture path.
-		 */
-		combinedTransform_ = sensor->computeTransform(&orientation);
-		if (!!(combinedTransform_ & Transform::Transpose)) {
-			combinedTransform_ = Transform::Identity;
-			orientation = sensor->mountingOrientation();
-			status = Adjusted;
-		} else if (orientation != requestedOrientation) {
-			status = Adjusted;
-		}
-	} else {
-		combinedTransform_ = sensor->computeTransform(&orientation);
-		if (orientation != requestedOrientation)
-			status = Adjusted;
+	/* Use the sensor's native transform and reject axis-transposing transforms. */
+	combinedTransform_ = sensor->computeTransform(&orientation);
+	if (!!(combinedTransform_ & Transform::Transpose)) {
+		combinedTransform_ = Transform::Identity;
+		orientation = sensor->mountingOrientation();
+		status = Adjusted;
+	} else if (orientation != requestedOrientation) {
+		status = Adjusted;
 	}
 
 	/* Cap the number of entries to the available streams. */
@@ -1513,8 +1495,7 @@ CameraConfiguration::Status AtomispCameraConfiguration::validate()
 	const AtomispCameraData::Configuration *maxPipeConfig = nullptr;
 	const AtomispCameraData::Configuration *maxPipeConfigNonRaw = nullptr;
 	pipeConfig_ = nullptr;
-	const bool requireNonRawCapture =
-		data_->pipe()->atomispQuirks() && maxRawStreamSize.isNull();
+	const bool requireNonRawCapture = maxRawStreamSize.isNull();
 	auto atomispCaptureFormatScore = [](PixelFormat format) {
 		if (format == PixelFormat{ V4L2_PIX_FMT_UYVY }) return 0;
 		if (format == PixelFormat{ V4L2_PIX_FMT_YUYV }) return 1;
@@ -1810,7 +1791,7 @@ AtomispPipelineHandler::generateConfiguration(Camera *camera, Span<const StreamR
 	 * \todo Implement a better way to pick the default format
 	 */
 		auto pickDefaultFormat = [&](const auto &formats, bool processed) {
-			if (data->pipe()->atomispQuirks() && processed) {
+			if (processed) {
 				static const std::array<PixelFormat, 2> preferredFormats = {
 				PixelFormat{ V4L2_PIX_FMT_UYVY },
 				PixelFormat{ V4L2_PIX_FMT_YUYV },
@@ -1837,7 +1818,7 @@ AtomispPipelineHandler::generateConfiguration(Camera *camera, Span<const StreamR
 		 * PipeWire SPA plugin uses the correct value during format
 		 * negotiation (before configure() can update it).
 		 */
-			if (atomispQuirks() && role != StreamRole::Raw) {
+		if (role != StreamRole::Raw) {
 			const PixelFormatInfo &info = PixelFormatInfo::info(cfg.pixelFormat);
 			if (info.isValid()) {
 				cfg.stride = ((info.stride(cfg.size.width, 0, 1) + 63) / 64) * 64;
@@ -1923,8 +1904,7 @@ int AtomispPipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 	}
 
 	if (captureFormat.size != captureSize) {
-		if (data->pipe()->atomispQuirks() &&
-		    std::abs(static_cast<int>(captureFormat.size.width) -
+		if (std::abs(static_cast<int>(captureFormat.size.width) -
 			     static_cast<int>(captureSize.width)) <= 16 &&
 		    std::abs(static_cast<int>(captureFormat.size.height) -
 			     static_cast<int>(captureSize.height)) <= 16) {
@@ -1982,7 +1962,7 @@ int AtomispPipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 	}
 
 	/* Configure the AtomISP luminance AE loop when applicable */
-	if (atomispQuirks() && softwareAeEnabled_) {
+	if (softwareAeEnabled_) {
 		PixelFormat capturePf = captureFormat.fourcc.toPixelFormat();
 		data->atomispAe_ = std::make_unique<AtomispAeLoop>();
 		if (!data->atomispAe_->configure(data->sensor_.get(),
@@ -2208,14 +2188,11 @@ AtomispPipelineHandler::locateSensors(MediaDevice *media)
 	if (entities.empty())
 		return {};
 
-	if (atomispQuirks()) {
-		/*
-		 * Keep the real sensor entities (MEDIA_ENT_F_CAM_SENSOR) as camera
-		 * roots for AtomISP split sensor+ISP topologies. Mandatory controls
-		 * may only exist on the sensor entity.
-		 */
-		return entities;
-	}
+	/* Keep the real sensor entities as camera roots for AtomISP split
+	 * sensor+ISP topologies. Mandatory controls may only exist on the
+	 * sensor entity.
+	 */
+	return entities;
 
 	/*
 	 * Sensors can be made of multiple entities. For instance, a raw sensor
