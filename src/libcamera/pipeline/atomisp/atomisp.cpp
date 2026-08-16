@@ -60,136 +60,20 @@ LOG_DEFINE_CATEGORY(AtomispPipeline)
 
 /* -----------------------------------------------------------------------------
  *
- * Overview
- * --------
+ * The AtomISP handler discovers sensor-to-capture paths through the
+ * media-controller graph and negotiates formats along those paths. It shares
+ * generic graph, conversion and resource-reservation machinery with the
+ * simple handler, but has AtomISP-specific policy for:
  *
- * The AtomispPipelineHandler relies on generic kernel APIs to control a camera
- * device, without any device-specific code and with limited device-specific
- * static data.
+ * - ISP2400 versus ISP2401 exposure ownership;
+ * - firmware-adjusted capture sizes and stride padding;
+ * - sensor modes affected by DVS padding; and
+ * - the ISP2401 luminance-based AtomispAeLoop.
  *
- * To qualify for support by the simple pipeline handler, a device shall
- *
- * - be supported by V4L2 drivers, exposing the Media Controller API, the V4L2
- *   subdev APIs and the media bus format-based enumeration extension for the
- *   VIDIOC_ENUM_FMT ioctl ;
- * - not expose any device-specific API from drivers to userspace ;
- * - include one or more camera sensor media entities and one or more video
- *   capture devices ;
- * - have a capture pipeline with linear paths from the camera sensors to the
- *   video capture devices ; and
- * - have an optional memory-to-memory device to perform format conversion
- *   and/or scaling, exposed as a V4L2 M2M device.
- *
- * As devices that require a specific pipeline handler may still match the
- * above characteristics, the simple pipeline handler doesn't attempt to
- * automatically determine which devices it can support. It instead relies on
- * an explicit list of supported devices, provided in the supportedDevices
- * array.
- *
- * When matching a device, the pipeline handler enumerates all camera sensors
- * and attempts, for each of them, to find a path to a video capture video node.
- * It does so by using a breadth-first search to find the shortest path from the
- * sensor device to a valid capture device. This is guaranteed to produce a
- * valid path on devices with one only option and is a good heuristic on more
- * complex devices to skip paths that aren't suitable for the simple pipeline
- * handler. For instance, on the IPU-based i.MX6, the shortest path will skip
- * encoders and image converters, and it will end in a CSI capture device.
- * A more complex graph search algorithm could be implemented if a device that
- * would otherwise be compatible with the pipeline handler isn't correctly
- * handled by this heuristic.
- *
- * Once the camera data instances have been created, the match() function
- * creates a V4L2VideoDevice or V4L2Subdevice instance for each entity used by
- * any of the cameras and stores them in AtomispPipelineHandler::entities_,
- * accessible by the AtomispCameraData class through the
- * AtomispPipelineHandler::subdev() and AtomispPipelineHandler::video() functions.
- * This avoids duplication of subdev instances between different cameras when
- * the same entity is used in multiple paths.
- *
- * Finally, all camera data instances are initialized to gather information
- * about the possible pipeline configurations for the corresponding camera. If
- * valid pipeline configurations are found, a Camera is registered for the
- * AtomispCameraData instance.
- *
- * Pipeline Traversal
- * ------------------
- *
- * During the breadth-first search, the pipeline is traversed from entity to
- * entity, by following media graph links from source to sink, starting at the
- * camera sensor.
- *
- * When reaching an entity (on its sink side), if the entity is a V4L2 subdev
- * that supports the streams API, the subdev internal routes are followed to
- * find the connected source pads. Otherwise all of the entity's source pads
- * are considered to continue the graph traversal. The pipeline handler
- * currently considers the default internal routes only and doesn't attempt to
- * setup custom routes. This can be extended if needed.
- *
- * The shortest path between the camera sensor and a video node is stored in
- * AtomispCameraData::entities_ as a list of AtomispCameraData::Entity structures,
- * ordered along the data path from the camera sensor to the video node. The
- * Entity structure stores a pointer to the MediaEntity, as well as information
- * about how it is connected in that particular path for later usage when
- * configuring the pipeline.
- *
- * Pipeline Configuration
- * ----------------------
- *
- * The simple pipeline handler configures the pipeline by propagating V4L2
- * subdev formats from the camera sensor to the video node. The format is first
- * set on the camera sensor's output, picking a resolution supported by the
- * sensor that best matches the needs of the requested streams. Then, on every
- * link in the pipeline, the format is retrieved on the link source and set
- * unmodified on the link sink.
- *
- * The best sensor resolution is selected using a heuristic that tries to
- * minimize the required bus and memory bandwidth, as the simple pipeline
- * handler is typically used on smaller, less powerful systems. To avoid the
- * need to upscale, the pipeline handler picks the smallest sensor resolution
- * large enough to accommodate the need of all streams. Resolutions that
- * significantly restrict the field of view are ignored.
- *
- * When initializating the camera data, the above format propagation procedure
- * is repeated for every media bus format and size supported by the camera
- * sensor. Upon reaching the video node, the pixel formats compatible with the
- * media bus format are enumerated. Each combination of the input media bus
- * format, output pixel format and output size are recorded in an instance of
- * the AtomispCameraData::Configuration structure, stored in the
- * AtomispCameraData::configs_ vector.
- *
- * Format Conversion and Scaling
- * -----------------------------
- *
- * The capture pipeline isn't expected to include a scaler, and if a scaler is
- * available, it is ignored when configuring the pipeline. However, the simple
- * pipeline handler supports optional memory-to-memory converters to scale the
- * image and convert it to a different pixel format. If such a converter is
- * present, the pipeline handler enumerates, for each pipeline configuration,
- * the pixel formats and sizes that the converter can produce for the output of
- * the capture video node, and stores the information in the outputFormats and
- * outputSizes of the AtomispCameraData::Configuration structure.
- *
- * Concurrent Access to Cameras
- * ----------------------------
- *
- * The cameras created by the same pipeline handler instance may share hardware
- * resources. For instances, a platform may have multiple CSI-2 receivers but a
- * single DMA engine, prohibiting usage of multiple cameras concurrently. This
- * depends heavily on the hardware architecture, which the simple pipeline
- * handler has no a priori knowledge of. The pipeline handler thus implements a
- * heuristic to handle sharing of hardware resources in a generic fashion.
- *
- * Two cameras are considered to be mutually exclusive if they share common
- * pads along the pipeline from the camera sensor to the video node. An entity
- * can thus be used concurrently by multiple cameras, as long as pads are
- * distinct.
- *
- * A resource reservation mechanism is implemented by the AtomispPipelineHandler
- * acquirePipeline() and releasePipeline() functions to manage exclusive access
- * to pads. A camera reserves all the pads present in its pipeline when it is
- * started, and the start() function returns an error if any of the required
- * pads is already in use. When the camera is stopped, the pads it has reserved
- * are released.
+ * The code below should therefore stay focused on AtomISP graph and buffer
+ * semantics. Static sensor data belongs in the sensor property database, while
+ * sensor- or board-specific workarounds should be isolated in AtomISP camera
+ * profiles as support for more devices is added.
  */
 
 class AtomispPipelineHandler;
