@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "../src/libcamera/pipeline/atomisp/atomisp_helpers.h"
+#include "../src/libcamera/pipeline/atomisp/atomisp_profiles.h"
 
 #include <iostream>
 
@@ -32,6 +33,16 @@ protected:
 		    !atomispSupportsSoftwareAe(0x2000) ||
 		    !atomispSupportsSoftwareAe(0x2010)) {
 			std::cerr << "Unexpected AtomISP AE capability" << std::endl;
+			return TestFail;
+		}
+
+		const AtomispCameraProfile mt9m114 =
+			atomispCameraProfile(0x2000, "mt9m114");
+		const AtomispCameraProfile otherSensor =
+			atomispCameraProfile(0x1010, "ov2685");
+		if (!mt9m114.softwareAe || !mt9m114.sensorFrameLength ||
+		    otherSensor.softwareAe || otherSensor.sensorFrameLength) {
+			std::cerr << "Unexpected AtomISP camera profile" << std::endl;
 			return TestFail;
 		}
 

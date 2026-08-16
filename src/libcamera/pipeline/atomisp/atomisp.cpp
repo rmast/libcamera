@@ -53,6 +53,7 @@
 #include "libcamera/internal/v4l2_videodevice.h"
 
 #include "atomisp_helpers.h"
+#include "atomisp_profiles.h"
 
 namespace libcamera {
 
@@ -170,6 +171,7 @@ public:
 	Signal<const ControlList &> setSensorControls;
 
 	bool configure(CameraSensor *sensor,
+		       const AtomispCameraProfile &profile,
 		       const PixelFormat &format, const Size &size,
 		       unsigned int bpl);
 	void bootstrap();
@@ -180,6 +182,7 @@ private:
 	void updateExposure(double msv);
 
 	CameraSensor *sensor_ = nullptr;
+	const AtomispCameraProfile *profile_ = nullptr;
 	PixelFormat format_;
 	Size size_;
 
@@ -210,10 +213,12 @@ private:
 };
 
 bool AtomispAeLoop::configure(CameraSensor *sensor,
+			      const AtomispCameraProfile &profile,
 			      const PixelFormat &format, const Size &size,
 			      unsigned int bpl)
 {
 	sensor_ = sensor;
+	profile_ = &profile;
 	format_ = format;
 	size_ = size;
 	bpl_ = bpl;
@@ -242,7 +247,7 @@ bool AtomispAeLoop::configure(CameraSensor *sensor,
 	 * where the static driver max (995) is wrong (e.g. 643 for a 624-line mode).
 	 */
 	auto itVblank = ctrls.find(V4L2_CID_VBLANK);
-	if (sensor->model() == "mt9m114" && itVblank != ctrls.end()) {
+	if (profile_->sensorFrameLength && itVblank != ctrls.end()) {
 		vblankMin_ = itVblank->second.min().get<int32_t>();
 		vblankMax_ = itVblank->second.max().get<int32_t>();
 		vblank_ = vblankMin_;
@@ -470,6 +475,7 @@ public:
 			 MediaEntity *sensor);
 
 	bool isValid() const { return sensor_ != nullptr; }
+	bool softwareAeEnabled() const { return profile_.softwareAe; }
 	AtomispPipelineHandler *pipe();
 
 	int init();
@@ -528,6 +534,7 @@ public:
 	 */
 	std::list<Entity> entities_;
 	std::unique_ptr<CameraSensor> sensor_;
+	AtomispCameraProfile profile_{};
 	V4L2VideoDevice *video_;
 
 	std::vector<Configuration> configs_;
@@ -615,7 +622,7 @@ public:
 	V4L2Subdevice *subdev(const MediaEntity *entity);
 	std::shared_ptr<MediaDevice> converter() { return converter_; }
 	bool swIspEnabled() const { return swIspEnabled_; }
-	bool softwareAeEnabled() const { return softwareAeEnabled_; }
+	unsigned int hwRevision() const { return hwRevision_; }
 
 protected:
 	int queueRequestDevice(Camera *camera, Request *request) override;
@@ -649,7 +656,7 @@ private:
 
 	std::shared_ptr<MediaDevice> converter_;
 	bool swIspEnabled_;
-	bool softwareAeEnabled_;
+	unsigned int hwRevision_;
 };
 
 /* -----------------------------------------------------------------------------
@@ -754,6 +761,8 @@ AtomispCameraData::AtomispCameraData(AtomispPipelineHandler *pipe,
 	sensor_ = CameraSensorFactoryBase::create(sensor);
 	if (!sensor_)
 		return;
+
+	profile_ = atomispCameraProfile(pipe->hwRevision(), sensor_->model());
 
 	const CameraSensorProperties::SensorDelays &delays = sensor_->sensorDelays();
 	std::unordered_map<uint32_t, DelayedControls::ControlParams> params = {
@@ -1709,7 +1718,7 @@ AtomispPipelineHandler::AtomispPipelineHandler(CameraManager *manager)
 	: PipelineHandler(manager, kMaxQueuedRequestsDevice),
 	  converter_(nullptr),
 	  swIspEnabled_(false),
-	  softwareAeEnabled_(false)
+	  hwRevision_(0)
 {
 }
 
@@ -1962,10 +1971,10 @@ int AtomispPipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 	}
 
 	/* Configure the AtomISP luminance AE loop when applicable */
-	if (softwareAeEnabled_) {
+	if (data->softwareAeEnabled()) {
 		PixelFormat capturePf = captureFormat.fourcc.toPixelFormat();
 		data->atomispAe_ = std::make_unique<AtomispAeLoop>();
-		if (!data->atomispAe_->configure(data->sensor_.get(),
+		if (!data->atomispAe_->configure(data->sensor_.get(), data->profile_,
 						 capturePf, captureSize,
 						 captureFormat.planes[0].bpl)) {
 			LOG(AtomispPipeline, Warning) << "AtomISP AE loop disabled";
@@ -2061,7 +2070,7 @@ int AtomispPipelineHandler::start(Camera *camera, [[maybe_unused]] const Control
 			continue;
 
 		ControlList ifpCtrls(ctrls);
-		int32_t exposureMode = softwareAeEnabled_
+		int32_t exposureMode = data->softwareAeEnabled()
 			? V4L2_EXPOSURE_MANUAL : V4L2_EXPOSURE_AUTO;
 		ifpCtrls.set(V4L2_CID_EXPOSURE_AUTO, exposureMode);
 		ret = sd->setControls(&ifpCtrls);
@@ -2296,11 +2305,9 @@ bool AtomispPipelineHandler::matchDevice(std::shared_ptr<MediaDevice> media,
 	}
 
 	swIspEnabled_ = false; /* AtomISP always outputs YUV; no software debayering */
-	softwareAeEnabled_ = atomispSupportsSoftwareAe(media->hwRevision());
+	hwRevision_ = media->hwRevision();
 	LOG(AtomispPipeline, Info)
-		<< "AtomISP hardware revision " << utils::hex(media->hwRevision())
-		<< (softwareAeEnabled_ ? ": software AE enabled"
-				       : ": using sensor firmware AE");
+		<< "AtomISP hardware revision " << utils::hex(hwRevision_);
 	const GlobalConfiguration &configuration = cameraManager()->_d()->configuration();
 	for (const ValueNode &entry :
 	     configuration.configuration()["pipelines"]["atomisp"]["supported_devices"]
