@@ -25,6 +25,7 @@
 #include <libcamera/control_ids.h>
 #include <libcamera/controls.h>
 #include <libcamera/formats.h>
+#include <libcamera/property_ids.h>
 
 #include "libcamera/internal/v4l2_pixelformat.h"
 
@@ -42,9 +43,10 @@ LOG_DECLARE_CATEGORY(V4L2Compat)
 
 namespace {
 
-bool needsPackedPaddingWidthQuirk(const std::string &cameraId)
+bool needsPackedPaddingWidthQuirk(const ControlList &properties)
 {
-	return cameraId.find("mt9m114") != std::string::npos;
+	const std::optional<std::string_view> &model = properties.get(properties::Model);
+	return v4l2CompatNeedsPackedPaddingWidthQuirk(model);
 }
 
 } /* namespace */
@@ -53,7 +55,7 @@ V4L2CameraProxy::V4L2CameraProxy(unsigned int index,
 				 std::shared_ptr<Camera> camera)
 	: refcount_(0), index_(index), bufferCount_(0), currentBuf_(0),
 	  vcam_(std::make_unique<V4L2Camera>(camera)),
-	  packedPaddingWidthQuirk_(needsPackedPaddingWidthQuirk(camera->id())),
+	  packedPaddingWidthQuirk_(needsPackedPaddingWidthQuirk(camera->properties())),
 	  owner_(nullptr)
 {
 	querycap(camera);

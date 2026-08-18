@@ -3,6 +3,8 @@
 #include "../src/v4l2/v4l2_camera_proxy_helpers.h"
 
 #include <iostream>
+#include <optional>
+#include <string_view>
 
 #include "test.h"
 
@@ -11,6 +13,13 @@ class V4L2CameraProxyTest : public Test
 protected:
 	int run()
 	{
+		if (!v4l2CompatNeedsPackedPaddingWidthQuirk(std::string_view("mt9m114")) ||
+		    v4l2CompatNeedsPackedPaddingWidthQuirk(std::string_view("ov2685")) ||
+		    v4l2CompatNeedsPackedPaddingWidthQuirk(std::nullopt)) {
+			std::cerr << "Unexpected V4L2 compatibility camera selection" << std::endl;
+			return TestFail;
+		}
+
 		if (v4l2CompatExposedWidth(true, false, 1296, 2624) != 1296 ||
 		    v4l2CompatExposedWidth(true, true, 1296, 2624) != 1312 ||
 		    v4l2CompatExposedWidth(true, true, 1296, 2592) != 1296 ||
