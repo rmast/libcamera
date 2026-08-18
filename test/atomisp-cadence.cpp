@@ -41,7 +41,9 @@ protected:
 		const AtomispCameraProfile otherSensor =
 			atomispCameraProfile(0x1010, "ov2685");
 		if (!mt9m114.softwareAe || !mt9m114.sensorFrameLength ||
-		    otherSensor.softwareAe || otherSensor.sensorFrameLength) {
+		    otherSensor.softwareAe || otherSensor.sensorFrameLength ||
+		    mt9m114.minimumCaptureWidth != 1000 ||
+		    mt9m114.captureSizeDelta != 16) {
 			std::cerr << "Unexpected AtomISP camera profile" << std::endl;
 			return TestFail;
 		}

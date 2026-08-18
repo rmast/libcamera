@@ -926,7 +926,7 @@ void AtomispCameraData::tryPipeline(unsigned int code, const Size &size)
 				 * Binning mode (~648x488) must be skipped due to DVS
 				 * padding mismatch; only full-res (~1296x976) is usable.
 				 */
-				if (captureSize.width < 1000) {
+				if (captureSize.width < profile_.minimumCaptureWidth) {
 					LOG(AtomispPipeline, Debug)
 						<< "Skipping AtomISP binning-mode config for "
 						<< captureSize << "-" << videoFormat.first
@@ -945,9 +945,11 @@ void AtomispCameraData::tryPipeline(unsigned int code, const Size &size)
 					 */
 					if (video_->tryFormat(&captureFormat) < 0 ||
 					    (std::abs(static_cast<int>(captureFormat.size.width) -
-						     static_cast<int>(captureSize.width)) > 16) ||
+						     static_cast<int>(captureSize.width)) >
+					     profile_.captureSizeDelta) ||
 					    (std::abs(static_cast<int>(captureFormat.size.height) -
-						     static_cast<int>(captureSize.height)) > 16)) {
+						     static_cast<int>(captureSize.height)) >
+					     profile_.captureSizeDelta)) {
 						LOG(AtomispPipeline, Debug)
 							<< "Skipping AtomISP configuration for "
 							<< captureSize << "-" << videoFormat.first
@@ -1914,9 +1916,11 @@ int AtomispPipelineHandler::configure(Camera *camera, CameraConfiguration *c)
 
 	if (captureFormat.size != captureSize) {
 		if (std::abs(static_cast<int>(captureFormat.size.width) -
-			     static_cast<int>(captureSize.width)) <= 16 &&
+			     static_cast<int>(captureSize.width)) <=
+		    data->profile_.captureSizeDelta &&
 		    std::abs(static_cast<int>(captureFormat.size.height) -
-			     static_cast<int>(captureSize.height)) <= 16) {
+			     static_cast<int>(captureSize.height)) <=
+		    data->profile_.captureSizeDelta) {
 			LOG(AtomispPipeline, Debug)
 				<< "Tolerating AtomISP capture size delta: requested "
 				<< captureSize << ", got " << captureFormat.size;

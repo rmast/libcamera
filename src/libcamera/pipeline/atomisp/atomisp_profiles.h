@@ -11,6 +11,8 @@ namespace libcamera {
 struct AtomispCameraProfile {
 	bool softwareAe;
 	bool sensorFrameLength;
+	unsigned int minimumCaptureWidth;
+	unsigned int captureSizeDelta;
 };
 
 inline AtomispCameraProfile atomispCameraProfile(unsigned int hwRevision,
@@ -19,6 +21,8 @@ inline AtomispCameraProfile atomispCameraProfile(unsigned int hwRevision,
 	return {
 		atomispSupportsSoftwareAe(hwRevision),
 		sensorModel == "mt9m114",
+		1000,
+		16,
 	};
 }
 
