@@ -23,6 +23,14 @@ protected:
 			}
 		}
 
+		if (!atomispAeProcessFrame(0, 15, true) ||
+		    !atomispAeProcessFrame(14, 15, true) ||
+		    atomispAeProcessFrame(1, 15, true) ||
+		    atomispAeProcessFrame(0, 15, false)) {
+			std::cerr << "Unexpected initial AtomISP AE cadence" << std::endl;
+			return TestFail;
+		}
+
 		if (atomispAeCadenceInterval(15, 997, 997) != 15 ||
 		    atomispAeCadenceInterval(15, 997, 8000) != 1) {
 			std::cerr << "Unexpected AtomISP cadence interval" << std::endl;
@@ -54,7 +62,11 @@ protected:
 		    mt9m114.aeTuning.lowLightMsv != 1.2 ||
 		    mt9m114.aeTuning.lowLightGainFloor != 128 ||
 		    mt9m114.aeTuning.frameLengthLinesMaximum != 65535 ||
-		    mt9m114.aeTuning.maximumVblankFactor != 45) {
+		    mt9m114.aeTuning.maximumVblankFactor != 45 ||
+		    mt9m114.aeTuning.initialGain != 511 ||
+		    !mt9m114.aeTuning.processFirstFrame ||
+		    otherSensor.aeTuning.initialGain != 0 ||
+		    otherSensor.aeTuning.processFirstFrame) {
 			std::cerr << "Unexpected AtomISP camera profile" << std::endl;
 			return TestFail;
 		}

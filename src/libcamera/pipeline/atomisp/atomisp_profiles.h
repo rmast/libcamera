@@ -20,6 +20,8 @@ struct AtomispAeTuning {
 	int lowLightGainFloor;
 	int frameLengthLinesMaximum;
 	int maximumVblankFactor;
+	int initialGain;
+	bool processFirstFrame;
 };
 
 struct AtomispCameraProfile {
@@ -50,6 +52,8 @@ inline AtomispCameraProfile atomispCameraProfile(unsigned int hwRevision,
 			128,
 			65535,
 			45,
+			sensorModel == "mt9m114" ? 511 : 0,
+			sensorModel == "mt9m114",
 		},
 	};
 }

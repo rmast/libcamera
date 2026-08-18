@@ -14,6 +14,13 @@ constexpr bool atomispAeCadenceFrame(unsigned int frame, unsigned int interval)
 	return (frame + 1) % interval == 0;
 }
 
+constexpr bool atomispAeProcessFrame(unsigned int frame, unsigned int interval,
+					     bool processFirstFrame)
+{
+	return (processFirstFrame && frame == 0) ||
+	       atomispAeCadenceFrame(frame, interval);
+}
+
 constexpr unsigned int atomispAeCadenceInterval(unsigned int interval,
 					 unsigned int normalFrameLength,
 					 unsigned int frameLength)

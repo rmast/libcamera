@@ -261,6 +261,10 @@ bool AtomispAeLoop::configure(CameraSensor *sensor,
 		gain_ = gainMin_;
 	}
 
+	if (profile_->aeTuning.initialGain)
+		gain_ = std::clamp(static_cast<double>(profile_->aeTuning.initialGain),
+				   gainMin_, gainMax_);
+
 	LOG(AtomispPipeline, Debug)
 		<< "AtomISP AE configured: exp [" << exposureMin_ << ".."
 		<< exposureMax_ << "] hw=" << exposure_
@@ -292,7 +296,8 @@ void AtomispAeLoop::processBuffer(FrameBuffer *buffer)
 	const unsigned int frameLength = height_ + vblank_;
 	const unsigned int interval = atomispAeCadenceInterval(
 		profile_->aeTuning.cadenceInterval, normalFrameLength, frameLength);
-	if (!atomispAeCadenceFrame(frameCount_++, interval))
+	if (!atomispAeProcessFrame(frameCount_++, interval,
+				   profile_->aeTuning.processFirstFrame))
 		return;
 
 	const bool isUyvy = format_ == formats::UYVY;
