@@ -43,7 +43,18 @@ protected:
 		if (!mt9m114.softwareAe || !mt9m114.sensorFrameLength ||
 		    otherSensor.softwareAe || otherSensor.sensorFrameLength ||
 		    mt9m114.minimumCaptureWidth != 1000 ||
-		    mt9m114.captureSizeDelta != 16) {
+		    mt9m114.captureSizeDelta != 16 ||
+		    mt9m114.aeTuning.cadenceInterval != 15 ||
+		    mt9m114.aeTuning.targetMsv != 2.5 ||
+		    mt9m114.aeTuning.satisfactoryMsv != 0.3 ||
+		    mt9m114.aeTuning.proportionalGain != 0.02 ||
+		    mt9m114.aeTuning.maximumStep != 0.10 ||
+		    mt9m114.aeTuning.lowLightProportionalGain != 0.08 ||
+		    mt9m114.aeTuning.lowLightMaximumStep != 0.25 ||
+		    mt9m114.aeTuning.lowLightMsv != 1.2 ||
+		    mt9m114.aeTuning.lowLightGainFloor != 128 ||
+		    mt9m114.aeTuning.frameLengthLinesMaximum != 65535 ||
+		    mt9m114.aeTuning.maximumVblankFactor != 45) {
 			std::cerr << "Unexpected AtomISP camera profile" << std::endl;
 			return TestFail;
 		}

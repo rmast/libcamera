@@ -193,22 +193,6 @@ private:
 	double gain_ = 1.0, gainMin_ = 1.0, gainMax_ = 1.0;
 	unsigned int bpl_ = 0;
 
-	/* Process every kInterval frames; slow enough for sensor response */
-	static constexpr unsigned int kInterval = 15;
-	/* MSV target and controller constants */
-	static constexpr double kOptimalMsv = 2.5;
-	static constexpr double kSatisfactory = 0.3;
-	static constexpr double kPGain = 0.02;
-	static constexpr double kMaxStep = 0.10;
-	static constexpr double kPGainLowLight = 0.08;
-	static constexpr double kMaxStepLowLight = 0.25;
-	static constexpr double kLowLightMsv = 1.2;
-	static constexpr int32_t kLowLightGainFloor = 128;
-	/* MT9M114 CAM_SENSOR_CFG_FRAME_LENGTH_LINES_MAX */
-	static constexpr int32_t kFllMax = 65535;
-	/* Limit vblank to this multiple of normal FLL (30 -> allow down to ~1fps). */
-	static constexpr int32_t kMaxVblankFactor = 45;
-
 	unsigned int frameCount_ = 0;
 };
 
@@ -251,10 +235,10 @@ bool AtomispAeLoop::configure(CameraSensor *sensor,
 		vblankMin_ = itVblank->second.min().get<int32_t>();
 		vblankMax_ = itVblank->second.max().get<int32_t>();
 		vblank_ = vblankMin_;
-		height_ = kFllMax - vblankMax_;
+		height_ = profile_->aeTuning.frameLengthLinesMaximum - vblankMax_;
 		exposureMax_ = height_ + vblank_ - 2;
-		/* kMaxVblankFactor × normal FLL → fps drops to 1/kMaxVblankFactor at most. */
-		vblankPracticalMax_ = std::min((height_ + vblankMin_) * kMaxVblankFactor - height_,
+		vblankPracticalMax_ = std::min((height_ + vblankMin_) *
+					       profile_->aeTuning.maximumVblankFactor - height_,
 					   vblankMax_);
 	}
 
@@ -307,7 +291,7 @@ void AtomispAeLoop::processBuffer(FrameBuffer *buffer)
 	const unsigned int normalFrameLength = height_ + vblankMin_;
 	const unsigned int frameLength = height_ + vblank_;
 	const unsigned int interval = atomispAeCadenceInterval(
-		kInterval, normalFrameLength, frameLength);
+		profile_->aeTuning.cadenceInterval, normalFrameLength, frameLength);
 	if (!atomispAeCadenceFrame(frameCount_++, interval))
 		return;
 
@@ -384,21 +368,22 @@ void AtomispAeLoop::updateExposure(double msv)
 	const int32_t previousGain = static_cast<int32_t>(gain_);
 	const int32_t previousVblank = vblank_;
 
-	double error = kOptimalMsv - msv;
+	const AtomispAeTuning &tuning = profile_->aeTuning;
+	double error = tuning.targetMsv - msv;
 
-	if (std::abs(error) <= kSatisfactory)
+	if (std::abs(error) <= tuning.satisfactoryMsv)
 		return;
 
-	double pGain = kPGain;
-	double maxStep = kMaxStep;
+	double pGain = tuning.proportionalGain;
+	double maxStep = tuning.maximumStep;
 
 	/*
 	 * Accelerate frame-length growth when normal-frame exposure is exhausted
 	 * and the scene remains severely underexposed.
 	 */
-	if (exposure_ >= exposureMax_ && msv < kLowLightMsv) {
-		pGain = kPGainLowLight;
-		maxStep = kMaxStepLowLight;
+	if (exposure_ >= exposureMax_ && msv < tuning.lowLightMsv) {
+		pGain = tuning.lowLightProportionalGain;
+		maxStep = tuning.lowLightMaximumStep;
 	}
 
 	double step = std::clamp(error * pGain, -maxStep, maxStep);
@@ -409,20 +394,20 @@ void AtomispAeLoop::updateExposure(double msv)
 		/* Too dark: raise normal-frame exposure, then gain, then frame time. */
 		if (exposure_ < exposureMax_) {
 			exposure_ = atomispNextExposure(exposure_, exposureMin_, exposureMax_,
-							msv, kLowLightMsv, factor);
+							msv, tuning.lowLightMsv, factor);
 			changed = true;
 		} else if (gain_ < gainMax_) {
-			const int32_t gainFloor = msv < kLowLightMsv
-				? std::min(kLowLightGainFloor, static_cast<int32_t>(gainMax_))
+			const int32_t gainFloor = msv < tuning.lowLightMsv
+				? std::min(tuning.lowLightGainFloor, static_cast<int32_t>(gainMax_))
 				: gainMin_;
 			const int32_t targetGain = atomispTargetGain(
-				static_cast<int32_t>(gain_), msv, kOptimalMsv, gainMax_);
+				static_cast<int32_t>(gain_), msv, tuning.targetMsv, gainMax_);
 			gain_ = std::max(gainFloor, targetGain);
 			changed = true;
 		} else if (height_ > 0 && vblank_ < vblankPracticalMax_) {
 			/* Extend frame time before raising exposure on the next cycle. */
-			vblank_ = msv < kOptimalMsv - kSatisfactory
-				? atomispTargetVblank(height_, vblank_, msv, kOptimalMsv,
+			vblank_ = msv < tuning.targetMsv - tuning.satisfactoryMsv
+				? atomispTargetVblank(height_, vblank_, msv, tuning.targetMsv,
 						       vblankPracticalMax_)
 				: atomispNextVblank(height_, vblank_, factor,
 						     vblankPracticalMax_);
@@ -433,7 +418,7 @@ void AtomispAeLoop::updateExposure(double msv)
 		/* Too bright: restore fps first, then gain, then exposure */
 		if (height_ > 0 && vblank_ > vblankMin_) {
 			vblank_ = atomispTargetVblankDown(height_, vblank_, msv,
-						  kOptimalMsv, vblankMin_);
+						  tuning.targetMsv, vblankMin_);
 			exposureMax_ = height_ + vblank_ - 2;
 			exposure_ = std::min(exposure_, exposureMax_);
 			changed = true;

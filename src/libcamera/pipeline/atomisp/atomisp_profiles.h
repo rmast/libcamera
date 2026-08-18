@@ -8,11 +8,26 @@
 
 namespace libcamera {
 
+struct AtomispAeTuning {
+	unsigned int cadenceInterval;
+	double targetMsv;
+	double satisfactoryMsv;
+	double proportionalGain;
+	double maximumStep;
+	double lowLightProportionalGain;
+	double lowLightMaximumStep;
+	double lowLightMsv;
+	int lowLightGainFloor;
+	int frameLengthLinesMaximum;
+	int maximumVblankFactor;
+};
+
 struct AtomispCameraProfile {
 	bool softwareAe;
 	bool sensorFrameLength;
 	unsigned int minimumCaptureWidth;
 	unsigned int captureSizeDelta;
+	AtomispAeTuning aeTuning;
 };
 
 inline AtomispCameraProfile atomispCameraProfile(unsigned int hwRevision,
@@ -23,6 +38,19 @@ inline AtomispCameraProfile atomispCameraProfile(unsigned int hwRevision,
 		sensorModel == "mt9m114",
 		1000,
 		16,
+		{
+			15,
+			2.5,
+			0.3,
+			0.02,
+			0.10,
+			0.08,
+			0.25,
+			1.2,
+			128,
+			65535,
+			45,
+		},
 	};
 }
 
