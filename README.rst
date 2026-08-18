@@ -212,3 +212,64 @@ This can be solved in two ways:
 2. If a version of meson which is different from the system-wide version is
    already installed, uninstall that meson using pip3, and install again without
    the --user argument.
+
+AtomISP validation
+~~~~~~~~~~~~~~~~~~
+
+The AtomISP pipeline has been validated with the MT9M114 on two platforms:
+
+* T100TA with ISP2400
+* HP x2 210 with ISP2401
+
+Use the near-native modes ``1280x720`` and ``1280x960`` as the primary
+validation matrix. The ``704x576`` mode is an additional compatibility test
+because native Firefox can request it, even though the mode is not explicitly
+published by the pipeline. Record the negotiated format, actual capture size,
+bytes per line, ``sizeimage``, rotation, and exposure behaviour for every
+capture.
+
+The ``640x480`` mode is not a validation gate. On the T100TA/ISP2400 the
+MT9M114 binning path has a known DVS padding problem, so failures in this mode
+must not be used to judge cleanup changes. It may be run once to confirm that
+the known limitation remains documented.
+
+When both platforms must be tested, complete the full matrix on one platform,
+save the logs and record the kernel and libcamera revisions, then switch the
+boot medium and repeat the same matrix on the other platform. Do not switch
+platforms in the middle of a negotiation or regression investigation.
+
+For a new AtomISP build directory, configure Meson with the AtomISP pipeline
+and tests enabled before running Ninja:
+
+.. code::
+
+        meson setup build -Dpipelines=simple,atomisp -Dtest=true \
+                -Dv4l2=enabled -Dgstreamer=disabled -Dqcam=disabled
+
+If ``build`` already exists, update its configuration instead of running a
+second setup:
+
+.. code::
+
+        meson setup build --reconfigure -Dpipelines=simple,atomisp \
+                -Dtest=true -Dv4l2=enabled -Dgstreamer=disabled -Dqcam=disabled
+
+Meson setup is needed when creating or changing the build configuration. It
+also regenerates build files when source build definitions change. Once the
+desired configuration is present, a normal source change only requires Ninja:
+
+.. code::
+
+        ninja -C build test
+
+For runtime testing, enumerate the camera and enable AtomISP debug logging as
+needed:
+
+.. code::
+
+        LIBCAMERA_LOG_LEVELS=*:DEBUG cam -l
+        LIBCAMERA_LOG_LEVELS=*:DEBUG cam -c 1 --capture=10 --file
+
+Keep the runtime logs for each platform and resolution together with the
+revision information. This makes a later removal of a kernel or pipeline
+workaround reproducible without another platform switch.
