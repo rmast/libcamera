@@ -1376,33 +1376,6 @@ AtomispCameraConfiguration::AtomispCameraConfiguration(Camera *camera,
 {
 }
 
-namespace {
-
-static Size adjustSize(const Size &requestedSize, const SizeRange &supportedSizes)
-{
-	ASSERT(supportedSizes.min <= supportedSizes.max);
-
-	if (supportedSizes.min == supportedSizes.max)
-		return supportedSizes.max;
-
-	unsigned int hStep = supportedSizes.hStep;
-	unsigned int vStep = supportedSizes.vStep;
-
-	if (hStep == 0)
-		hStep = supportedSizes.max.width - supportedSizes.min.width;
-	if (vStep == 0)
-		vStep = supportedSizes.max.height - supportedSizes.min.height;
-
-	Size adjusted = requestedSize.boundedTo(supportedSizes.max)
-				.expandedTo(supportedSizes.min);
-
-	return adjusted.shrunkBy(supportedSizes.min)
-		.alignedDownTo(hStep, vStep)
-		.grownBy(supportedSizes.min);
-}
-
-} /* namespace */
-
 CameraConfiguration::Status AtomispCameraConfiguration::validate()
 {
 	const CameraSensor *sensor = data_->sensor_.get();
@@ -1649,7 +1622,7 @@ CameraConfiguration::Status AtomispCameraConfiguration::validate()
 			 * the smaller valid output size closest to the requested.
 			 */
 			if (!pipeConfig_->outputSizes.contains(adjustedSize))
-				adjustedSize = adjustSize(cfg.size, pipeConfig_->outputSizes);
+				adjustedSize = atomispAdjustSize(cfg.size, pipeConfig_->outputSizes);
 			LOG(AtomispPipeline, Debug)
 				<< "Adjusting size from " << cfg.size
 				<< " to " << adjustedSize;
@@ -1822,7 +1795,7 @@ AtomispPipelineHandler::generateConfiguration(Camera *camera, Span<const StreamR
 		if (role != StreamRole::Raw) {
 			const PixelFormatInfo &info = PixelFormatInfo::info(cfg.pixelFormat);
 			if (info.isValid()) {
-				cfg.stride = ((info.stride(cfg.size.width, 0, 1) + 63) / 64) * 64;
+				cfg.stride = atomispAlignedStride(info.stride(cfg.size.width, 0, 1));
 				cfg.frameSize = cfg.stride * cfg.size.height;
 			}
 		}

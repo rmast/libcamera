@@ -4,10 +4,42 @@
 
 #include <algorithm>
 
+#include <libcamera/base/log.h>
+#include <libcamera/geometry.h>
+
 namespace libcamera {
 
 constexpr unsigned int kAtomispHwRevisionMask = 0x0000ff00;
 constexpr unsigned int kAtomispHwRevisionIsp2401 = 0x00002000;
+
+inline Size atomispAdjustSize(const Size &requestedSize,
+			      const SizeRange &supportedSizes)
+{
+	ASSERT(supportedSizes.min <= supportedSizes.max);
+
+	if (supportedSizes.min == supportedSizes.max)
+		return supportedSizes.max;
+
+	unsigned int hStep = supportedSizes.hStep;
+	unsigned int vStep = supportedSizes.vStep;
+
+	if (hStep == 0)
+		hStep = supportedSizes.max.width - supportedSizes.min.width;
+	if (vStep == 0)
+		vStep = supportedSizes.max.height - supportedSizes.min.height;
+
+	Size adjusted = requestedSize.boundedTo(supportedSizes.max)
+				.expandedTo(supportedSizes.min);
+
+	return adjusted.shrunkBy(supportedSizes.min)
+		.alignedDownTo(hStep, vStep)
+		.grownBy(supportedSizes.min);
+}
+
+constexpr unsigned int atomispAlignedStride(unsigned int stride)
+{
+	return ((stride + 63) / 64) * 64;
+}
 
 constexpr bool atomispAeCadenceFrame(unsigned int frame, unsigned int interval)
 {

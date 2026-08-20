@@ -37,6 +37,21 @@ protected:
 			return TestFail;
 		}
 
+		const SizeRange sizeRange{ { 640, 480 }, { 1280, 960 }, 16, 8 };
+		if (atomispAdjustSize({ 1279, 959 }, sizeRange) != Size{ 1264, 952 } ||
+		    atomispAdjustSize({ 320, 240 }, sizeRange) != Size{ 640, 480 } ||
+		    atomispAdjustSize({ 1281, 961 }, sizeRange) != Size{ 1280, 960 }) {
+			std::cerr << "Unexpected AtomISP size adjustment" << std::endl;
+			return TestFail;
+		}
+
+		if (atomispAlignedStride(0) != 0 ||
+		    atomispAlignedStride(2568) != 2624 ||
+		    atomispAlignedStride(2624) != 2624) {
+			std::cerr << "Unexpected AtomISP stride alignment" << std::endl;
+			return TestFail;
+		}
+
 		if (atomispSupportsSoftwareAe(0x1010) ||
 		    !atomispSupportsSoftwareAe(0x2000) ||
 		    !atomispSupportsSoftwareAe(0x2010)) {
