@@ -1758,12 +1758,7 @@ AtomispPipelineHandler::generateConfiguration(Camera *camera, Span<const StreamR
 	setUpFormatSizes(processedFormats);
 	setUpFormatSizes(rawFormats);
 
-	/*
-	 * Create the stream configurations. Take the first entry in the formats
-	 * map as the default, for lack of a better option.
-	 *
-	 * \todo Implement a better way to pick the default format
-	 */
+	/* Create stream configurations with a packed-YUV default when available. */
 		auto pickDefaultFormat = [&](const auto &formats, bool processed) {
 			if (processed) {
 				static const std::array<PixelFormat, 2> preferredFormats = {
@@ -1785,7 +1780,7 @@ AtomispPipelineHandler::generateConfiguration(Camera *camera, Span<const StreamR
 		const auto &formats = (role == StreamRole::Raw ? rawFormats : processedFormats);
 		StreamConfiguration cfg{ StreamFormats{ formats } };
 		cfg.pixelFormat = pickDefaultFormat(formats, role != StreamRole::Raw);
-		cfg.size = formats.begin()->second[0].max;
+		cfg.size = formats.find(cfg.pixelFormat)->second[0].max;
 
 		/*
 		 * Pre-compute stride with AtomISP's 64-byte row alignment so the
