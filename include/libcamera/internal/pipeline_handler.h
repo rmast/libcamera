@@ -82,6 +82,7 @@ public:
 protected:
 	void registerCamera(std::shared_ptr<Camera> camera);
 	void hotplugMediaDevice(std::shared_ptr<MediaDevice> media);
+	void releaseMediaDevice(const std::shared_ptr<MediaDevice> &media);
 	unsigned int useCount() const { return useCount_; }
 
 	virtual int queueRequestDevice(Camera *camera, Request *request) = 0;

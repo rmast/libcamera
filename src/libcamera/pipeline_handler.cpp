@@ -7,6 +7,7 @@
 
 #include "libcamera/internal/pipeline_handler.h"
 
+#include <algorithm>
 #include <chrono>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
@@ -146,6 +147,16 @@ PipelineHandler::acquireMediaDevice(DeviceEnumerator *enumerator,
 	mediaDevices_.push_back(media);
 
 	return media;
+}
+
+void PipelineHandler::releaseMediaDevice(const std::shared_ptr<MediaDevice> &media)
+{
+	auto iter = std::find(mediaDevices_.begin(), mediaDevices_.end(), media);
+	if (iter == mediaDevices_.end())
+		return;
+
+	media->release();
+	mediaDevices_.erase(iter);
 }
 
 /**

@@ -2421,17 +2421,7 @@ bool AtomispPipelineHandler::match(DeviceEnumerator *enumerator)
 				return true;
 			}
 
-			/*
-			 * \todo We need to clear the list of media devices
-			 * that we've already acquired in the event that we
-			 * fail to create a camera. This requires a rework of
-			 * DeviceEnumerator, or even how we create pipelines
-			 * handlers. This is because at the moment acquired
-			 * media devices are only released on pipeline handler
-			 * deconstruction, and if we release them any earlier
-			 * then DeviceEnumerator::search() will keep returning
-			 * the same media devices.
-			 */
+			releaseMediaDevice(media);
 		}
 	}
 
