@@ -1456,9 +1456,9 @@ CameraConfiguration::Status AtomispCameraConfiguration::validate()
 	}
 
 	/*
-	 * \todo Pick the best sensor output media bus format when the
-	 * requested pixel format can be produced from multiple sensor media
-	 * bus formats.
+	 * Keep all sensor media bus formats in the configuration list. A generic
+	 * preference between formats would be sensor- and hardware-specific, and
+	 * no such policy is established for AtomISP yet.
 	 */
 
 	/*
